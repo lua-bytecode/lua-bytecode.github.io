@@ -25,7 +25,7 @@
          function FilePicker.onchange()
             ViewerOutput.textContent = ""
             if not bcviewer then
-               local ok, result = pcall(dofile, "/Egor-Skriptunoff/lua-bytecode/raw/master/lua-bytecode.lua")
+               local ok, result = pcall(require, "https://github.com/Egor-Skriptunoff/lua-bytecode/raw/master/lua-bytecode.lua")
                if ok then
                   bcviewer = result
                else
