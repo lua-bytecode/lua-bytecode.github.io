@@ -8,6 +8,7 @@
          *{margin:0;padding:0}
       </style>
       <script src="https://github.com/fengari-lua/fengari-web/releases/download/v0.1.4/fengari-web.js" type="text/javascript"></script>
+      <script src="https://github.com/Egor-Skriptunoff/lua-bytecode/raw/master/lua-bytecode.lua" type="application/lua" async></script>
    </head>
    <body>
       <div style="height:50px;background:#efe;display:flex;align-items:center">
@@ -25,12 +26,12 @@
          function FilePicker.onchange()
             ViewerOutput.textContent = ""
             if not bcviewer then
-               local ok, result = pcall(require, "https://github.com/Egor-Skriptunoff/lua-bytecode/raw/master/lua-bytecode")
-               if ok then
-                  bcviewer = result
-               else
-                  ViewerOutput.textContent = 'Failed to load module "lua-bytecode.lua"\n'..tostring(result)
-               end
+               --local ok, result = pcall(require, "https://github.com/Egor-Skriptunoff/lua-bytecode/raw/master/lua-bytecode")
+               --if ok then
+               --   bcviewer = result
+               --else
+                  ViewerOutput.textContent = 'Failed to load module "lua-bytecode.lua"\n'--..tostring(result)
+               --end
             end
             if bcviewer then
                local File = (FilePicker.files or {})[0]
