@@ -1,3 +1,94 @@
-Under construction
-<br>
-This page will be available soon
+<!DOCTYPE html>
+<html>
+   <head>
+      <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+      <title>Lua Bytecode File Viewer</title>
+      <style>
+         html,body{height:100%}
+         *{margin:0;padding:0}
+      </style>
+      <script src="https://github.com/fengari-lua/fengari-web/releases/download/v0.1.4/fengari-web.js" type="text/javascript"></script>
+   </head>
+   <body>
+      <div style="height:50px;background:#efe;display:flex;align-items:center">
+         &nbsp; &nbsp;<b>Lua Bytecode File Viewer</b>&nbsp; &nbsp;
+         <input type="file" id="FilePicker">
+      </div>
+      <textarea style="width:100%;height:calc(100% - 50px);background:#ffe;white-space:pre;resize:none;border:none" id="ViewerOutput" readonly></textarea>
+      <script type="application/lua">
+         local js = require"js"
+         local window = js.global
+         local document = window.document
+         local FilePicker = document:getElementById"FilePicker"
+         local ViewerOutput = document:getElementById"ViewerOutput"
+
+         function FilePicker.onchange()
+            ViewerOutput.textContent = ""
+            if not bcviewer then
+               local ok, result = pcall(dofile, "https://github.com/Egor-Skriptunoff/lua-bytecode/raw/master/lua-bytecode.lua")
+               if ok then
+                  bcviewer = result
+               else
+                  ViewerOutput.textContent = 'Failed to load "lua-bytecode.lua"\n'..tostring(result)
+               end
+            end
+            if bcviewer then
+               local File = (FilePicker.files or {})[0]
+               if File then
+                  local reader = js.new(window.FileReader)
+
+                  function reader.onload()
+                     local pos, utf8_binary_string = 1, reader.result
+                     local bytecode_description = bcviewer(
+                        function (number_of_bytes)
+                           -- This function returns next substring of bytecode
+                           local chars, k, c = {}, 0, true
+                           while k < number_of_bytes and c do
+                              k, c, pos = k+1, utf8_binary_string:match("(.[\x80-\xBF]?)()", pos)
+                              chars[k] = c and c:find"^[\xC2\xC3]" and c.char(c:byte()-0xC2<<6|c:byte(-1)) or c
+                           end
+                           return table.concat(chars)
+                        end
+                     )
+                     ViewerOutput.textContent = bytecode_description
+                  end
+
+                  reader:readAsBinaryString(File)
+               end
+            end
+         end
+      </script>
+   </body>
+</html>
+
+<!--
+<!DOCTYPE html>
+<html>
+   <head>
+      <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+      <title></title>
+      <style>
+         html,body{height:100%}
+         *{margin:0;padding:0}
+      </style>
+      <script src="https://github.com/fengari-lua/fengari-web/releases/download/v0.1.4/fengari-web.js" type="text/javascript"></script>
+   </head>
+   <body>
+      <textarea style="width:100%;height:100%;background:#eee;white-space:pre;border-style:none;resize: none" id="Output" readonly></textarea>
+      <script type="application/lua">
+         local js = require"js"
+         local window = js.global
+         local document = window.document
+         local Output = document:getElementById"Output"
+local s = ""
+for line = 1, 99 do
+for cols = 1, line*3 do
+s = s..string.char(math.random(33, 126))
+end
+s = s.."\n"
+end
+         Output.textContent = s
+      </script>
+   </body>
+</html>
+-->
