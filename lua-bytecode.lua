@@ -1,6 +1,6 @@
 -- lua-bytecode.lua
 
--- Version: 2019-02-17
+-- Version: 2019-02-18
 
 local dot = assert(tostring(5.5):match"5(%p)5")
 do
@@ -1309,7 +1309,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      instr_as_text = regs(A, name == "LOADNIL" and A + B or B, true).." = nil"
                   elseif name == "SELF" then
                      -- A B C   R(A+1) := R(B); R(A) := R(B)[RK(C)]
-                     instr_as_text = "@@R"..(A+1).." = @R"..B..";  @@R"..A.." = @R"..B.."["..params[3].."]   -- prepare for @R"..B..":"..params[3].."()"
+                     instr_as_text = "@@R"..(A+1).." = @R"..B..";  @@R"..A.." = @R"..B.."["..params[3].."]   -- prepare for @R"..B..":method()"
                   elseif name == "FORLOOP" then
                      -- A sBx   R(A)+=R(A+2); if R(A) <?= R(A+1) then { pc+=sBx; R(A+3)=R(A) }
                      instr_as_text = "@@R"..A.." += @R"..(A+2)..";  if @R"..A.." <?= @R"..(A+1).." then { @@R"..(A+3).." = @R"..A..";  GOTO "..params[2].." }  -- end loop"
@@ -1600,45 +1600,48 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, subfu
    end
 
    local function insert_consts_and_varnames(instr_as_text, pc, all_consts, all_locals, all_upvalues, arg_reg_no)
-      local text, orig_comment = instr_as_text:match"^(.-)(%s*%-%-.*)$"
       local comments = {}
-      text = (text or instr_as_text):gsub("(@+)(%a*#?)(%d*)",
-         function(dogs, word, num)
-            local suffix = ""
-            if word == "R" then
-               local num = assert(tonumber(num))
-               for _, loc in ipairs(all_locals) do
-                  if loc.reg_no == num and pc >= (dogs == "@" and loc.start_pc or loc.def_pc) and pc <= loc.end_pc then
-                     loc = loc.var_name
-                     if loc:sub(1, 1) ~= "(" then
-                        suffix = "@"..loc
+      instr_as_text = instr_as_text
+         :gsub("^(.-)%s*(%-%-.*)$", "%1\0%2")
+         :gsub("(@+)(%a*#?)(%d*)",
+            function(dogs, word, num)
+               local suffix = ""
+               if word == "R" then
+                  local num = assert(tonumber(num))
+                  for _, loc in ipairs(all_locals) do
+                     if loc.reg_no == num and pc >= (dogs == "@" and loc.start_pc or loc.def_pc) and pc <= loc.end_pc then
+                        loc = loc.var_name
+                        if loc:sub(1, 1) ~= "(" then
+                           suffix = "@"..loc
+                        end
+                        break
                      end
-                     break
                   end
+                  if num == arg_reg_no then
+                     suffix = "@arg"
+                  end
+               elseif word == "Const#" then
+                  local const = assert(all_consts[tonumber(num)]).value_as_text
+                  if #const < 50 then
+                     table.insert(comments, word..num)
+                     word, num = const, ""
+                  end
+               elseif word == "Upvalue#" then
+                  word = "U"
+                  local upv = assert(all_upvalues[tonumber(num)]).var_name
+                  if upv then
+                     suffix = "@"..upv
+                  end
+               else
+                  error("Unrecognized symbol "..dogs..word..num)
                end
-               if num == arg_reg_no then
-                  suffix = "@arg"
-               end
-            elseif word == "Const#" then
-               local const = assert(all_consts[tonumber(num)]).value_as_text
-               if #const < 50 then
-                  table.insert(comments, word..num)
-                  word, num = const, ""
-               end
-            elseif word == "Upvalue#" then
-               word = "U"
-               local upv = assert(all_upvalues[tonumber(num)]).var_name
-               if upv then
-                  suffix = "@"..upv
-               end
-            else
-               error("Unrecognized symbol "..dogs..word..num)
+               return word..num..suffix
             end
-            return word..num..suffix
-         end
-      )
-      comments = (#comments == 0 and "" or "   -- It's "..table.concat(comments, ", "))..(orig_comment or "")
-      return text..(comments == "" and "" or (" "):rep(28-#text:gsub("\128-\191", ""))..comments)
+         )
+      local text, orig_comment = instr_as_text:match"^(%Z+)%z(%Z+)$"
+      text = text or instr_as_text
+      comments = (#comments == 0 and "" or "   -- It's "..table.concat(comments, ", "))..(orig_comment and "   "..orig_comment or "")
+      return text..(comments == "" and "" or (" "):rep(28-#text:gsub("[\128-\191]", ""))..comments)
    end
 
    Print(indent.."Instructions: "..proto_object.instr_qty)
@@ -1683,7 +1686,7 @@ local function bytecode_object_as_string(bytecode_object)
 end
 
 
-function bcviewer(bytecode_as_string_or_loader)
+local function bcviewer(bytecode_as_string_or_loader)
    local ok, bytecode_description = pcall(
       function(ldr)
          return bytecode_object_as_string(parse_or_convert_bytecode(ldr))
@@ -1692,3 +1695,5 @@ function bcviewer(bytecode_as_string_or_loader)
    )
    return ok and bytecode_description or "ERROR parsing bytecode\n"..tostring(bytecode_description)
 end
+
+return bcviewer

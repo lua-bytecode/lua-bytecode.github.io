@@ -8,14 +8,13 @@
          *{margin:0;padding:0}
       </style>
       <script src="https://github.com/fengari-lua/fengari-web/releases/download/v0.1.4/fengari-web.js" type="text/javascript"></script>
-      <script src="/lua-bytecode.lua" type="application/lua" async></script>
    </head>
    <body>
       <div style="height:50px;background:#efe;display:flex;align-items:center">
          &nbsp; &nbsp;<b>Lua Bytecode File Viewer</b>&nbsp; &nbsp;
          <input type="file" id="FilePicker">
       </div>
-      <textarea style="width:100%;height:calc(100% - 50px);background:#ffe;white-space:pre;resize:none;border:none" id="ViewerOutput" readonly></textarea>
+      <textarea style="width:100%;height:calc(100% - 52px);background:#ffe;white-space:pre;resize:none;border:none" id="ViewerOutput" readonly></textarea>
       <script type="application/lua">
          local js = require"js"
          local window = js.global
@@ -23,18 +22,18 @@
          local FilePicker = document:getElementById"FilePicker"
          local ViewerOutput = document:getElementById"ViewerOutput"
 
-         function FilePicker.onchange()
-            ViewerOutput.textContent = ""
-            if not bcviewer then
-               ViewerOutput.textContent = 'Failed to load module "lua-bytecode.lua"'
-            else
+         local ok, bcviewer = pcall(require, "lua-bytecode")
+         if ok then
+
+            function FilePicker.onchange()
                local File = (FilePicker.files or {})[0]
                if File then
+                  ViewerOutput.textContent = ""
                   local reader = js.new(window.FileReader)
 
                   function reader.onload()
                      local pos, utf8_binary_string = 1, reader.result
-                     local bytecode_description = bcviewer(
+                     ViewerOutput.textContent = bcviewer(
                         function (number_of_bytes)
                            -- This function returns next substring of bytecode
                            local chars, k, c = {}, 0, true
@@ -45,12 +44,15 @@
                            return table.concat(chars)
                         end
                      )
-                     ViewerOutput.textContent = bytecode_description
                   end
 
                   reader:readAsBinaryString(File)
                end
             end
+
+            ViewerOutput.textContent = 'Choose bytecode file'
+         else
+            ViewerOutput.textContent = 'Failed to load module "lua-bytecode.lua"\n'..tostring(bcviewer)
          end
       </script>
    </body>
