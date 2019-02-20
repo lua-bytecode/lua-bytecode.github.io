@@ -29,6 +29,7 @@
                if File then
                   ViewerOutput.textContent = "If you can read this message then your browser is not supported.\nTry another one: FireFox, Chrome.\n\nP.S.\nIf you know how to modify my tiny 'index.html' to make it work with your browser,\nplease create an issue and suggest a solution at\nhttps://github.com/lua-bytecode/lua-bytecode.github.io\n"
                   local reader = js.new(window.FileReader)
+                  
                   function reader.onloadstart()
                      ViewerOutput.textContent = "Wait please..."
                   end
