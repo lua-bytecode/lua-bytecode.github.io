@@ -1154,7 +1154,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       end
 
       -- Disassembling (preparing fields instr_as_luac and instr_as_text) without resolving upvalue, local, const names
-      local data_items_ahead, data_descr = 0     -- при установке нового значения data_items_ahead нужно явно присваивать data_descr
+      local data_items_ahead, data_descr = 0     -- ГЇГ°ГЁ ГіГ±ГІГ Г­Г®ГўГЄГҐ Г­Г®ГўГ®ГЈГ® Г§Г­Г Г·ГҐГ­ГЁГї data_items_ahead Г­ГіГ¦Г­Г® ГїГўГ­Г® ГЇГ°ГЁГ±ГўГ ГЁГўГ ГІГј data_descr
       local last_closure_51_pc, last_closure_51_upvalues, pc_after_TFORLOOP51
       for pc = 1, instr_qty do
          local instr = all_instructions[pc]
@@ -1568,7 +1568,7 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, subfu
    Print(indent.."Upvalues: "..proto_object.upv_qty)
    for j = 1, proto_object.upv_qty do
       Print(indent.."  "
-         ..rpad("Upvalue#"..j, 10).." is enclosing function's "
+         ..rpad("U"..j, 3).." is enclosing function's "
          ..rpad(proto_object.all_upvalues[j].in_locals
             and "R"..proto_object.all_upvalues[j].index
             or "Upvalue#"..proto_object.all_upvalues[j].index, 11)
