@@ -14,14 +14,14 @@
          &nbsp; &nbsp;<b>Lua Bytecode File Viewer</b>&nbsp; &nbsp;
          <input type="file" id="FilePicker">
       </div>
-      <textarea style="width:100%;height:calc(100% - 52px);background:#ffe;white-space:pre;resize:none;border:none" id="ViewerOutput" readonly>JavaScript must be enabled</textarea>
+      <textarea style="width:100%;height:calc(100% - 54px);background:#ffe;white-space:pre;resize:none" id="ViewerOutput" readonly>JavaScript must be enabled</textarea>
       <script type="application/lua">
          local js = require"js"
          local window = js.global
          local document = window.document
          local FilePicker = document:getElementById"FilePicker"
          local ViewerOutput = document:getElementById"ViewerOutput"
-         ViewerOutput.textContent = 'Fengari successfully loaded'
+         ViewerOutput.textContent = 'Fengari has been successfully loaded'
 
          local ok, bcviewer = pcall(require, "lua-bytecode")
          if ok then
@@ -29,7 +29,7 @@
             function FilePicker.onchange()
                local File = (FilePicker.files or {})[0]
                if File then
-                  ViewerOutput.textContent = ""
+                  ViewerOutput.textContent = "If you can read this message then your browser is not supported.\nTry another one: FireFox, Chrome.\n\nP.S.\nIf you know how to modify my tiny 'index.html' to make it work with your browser, please create an issue and suggest a solution at\nhttps://github.com/lua-bytecode/lua-bytecode.github.io\n"
                   local reader = js.new(window.FileReader)
 
                   function reader.onload()
