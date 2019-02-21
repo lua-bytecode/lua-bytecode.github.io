@@ -60,7 +60,7 @@
 
                   function reader.onerror()
                      local err = reader.error
-                     ViewerOutput.textContent = "ERROR: File could not be read!\n"..tostring(err.code).."\n"..tostring(err.name).."\n"..tostring(err.message).."\n"
+                     ViewerOutput.textContent = "ERROR: File could not be read!\n"..tostring(err.name).."\n"..tostring(err.message).."\n"
                   end
 
                   function reader.onload()
