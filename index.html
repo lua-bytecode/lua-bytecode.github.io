@@ -58,6 +58,11 @@
                      ViewerOutput.textContent = "Please wait..."
                   end
 
+                  function reader.onerror()
+                     local err = reader.error
+                     ViewerOutput.textContent = "ERROR: File could not be read!\n"..tostring(err.code).."\n"..tostring(err.name).."\n"..tostring(err.message).."\n"
+                  end
+
                   function reader.onload()
                      local pos, utf8_binary_string = 1, reader.result
                      listing, decompiled = bcviewer(
