@@ -1693,7 +1693,7 @@ local function bcviewer(bytecode_as_string_or_loader)
       end,
       bytecode_as_string_or_loader
    )
-   return ok and bytecode_description or "ERROR parsing bytecode\n"..tostring(bytecode_description)
+   return ok and bytecode_description or "ERROR parsing bytecode\n"..tostring(bytecode_description), "Under construction"
 end
 
 return bcviewer
