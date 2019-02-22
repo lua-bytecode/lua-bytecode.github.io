@@ -61,6 +61,8 @@
                   function reader.onerror()
                      local err = reader.error
                      ViewerOutput.textContent = "ERROR: File could not be read!\n"..tostring(err.name).."\n"..tostring(err.message).."\n"
+                     listing_is_displayed, listing, decompiled = nil
+                     Switch.style.display = "none"
                   end
 
                   function reader.onload()
