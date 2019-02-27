@@ -1,6 +1,6 @@
 -- lua-bytecode.lua
 
--- Version: 2019-02-18
+-- Version: 2019-02-27
 
 local dot = assert(tostring(5.5):match"5(%p)5")
 do
@@ -8,6 +8,12 @@ do
    assert(x - (x-1) == 1 and (x+1) - x ~= 1, "Floating point numbers must be 'double'")
    local s = "-5"..dot.."5"
    assert(tostring(-5.5) == s and tonumber(s) == -5.5)
+end
+
+local function tohex(n, min_digits)
+   -- this function is needed to workaround IE11-incompatibility of Fengari's string.format()
+   local s = ("%X"):format(n)
+   return ("0"):rep((min_digits or 1) - #s)..s
 end
 
 local function round_float8_to_float4(x)
@@ -251,7 +257,8 @@ do
    local escapings={["\a"]="\\a", ["\b"]="\\b", ["\t"]="\\t", ["\n"]="\\n", ["\v"]="\\v", ["\f"]="\\f", ["\r"]="\\r", ['"']='\\"', ["\\"]="\\\\"}
 
    function serialize_string_value(str)
-      return '"'..str:gsub('[%c"\\]', function(c) return escapings[c] or ("\a%03d"):format(c:byte()) end):gsub("\a(%d%d%d%d)", "\\%1"):gsub("\a0?0?", "\\")..'"'
+      -- return '"'..str:gsub('[%c"\\]', function(c) return escapings[c] or ("\a%03d"):format(c:byte()) end):gsub("\a(%d%d%d%d)", "\\%1"):gsub("\a0?0?", "\\")..'"'
+      return '"'..str:gsub('[%c"\\]', function(c) return escapings[c] or "\a"..tostring(1000 + c:byte()):sub(-3) end):gsub("\a(%d%d%d%d)", "\\%1"):gsub("\a0?0?", "\\")..'"'
    end
 
    local is_keyword = {
@@ -502,9 +509,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    end
 
    local function convert_lua_int_to_double(lua_int_as_array)
-      local result = a[1]
-      if a[2] then
-         result = result * 2^32 + a[2]
+      local result = lua_int_as_array[1]
+      if lua_int_as_array[2] then
+         result = result * 2^32 + lua_int_as_array[2]
       end
       return result
    end
@@ -713,7 +720,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    assert(read_block(4, true) == "\27Lua", "Wrong bytecode signature.  Only vanilla Lua bytecodes are supported.")
    -- [u8 version] Version number (0x52 for Lua 5.2, etc)
    Lua_version = read_byte(true)
-   assert(Lua_version >= 0x51 and Lua_version <= 0x53, "Lua version "..("%02X"):format(Lua_version):gsub("^.", "%0.").." is not supported")
+   assert(Lua_version >= 0x51 and Lua_version <= 0x53, "Lua version "..tohex(Lua_version, 2):gsub("^.", "%0.").." is not supported")
 
    -- [u8 impl] Implementation (0 = the bytecode is compatible with the "official" PUC-Rio implementation)
    assert(read_byte(true) == 0, "Bytecode is incompatible with PUC-Rio implementation")
@@ -753,7 +760,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       convert_to_enbi = parse_target_enbi(convert_to_enbi)
       if type(convert_to_enbi) == "string" then
-         print("Lua version of the source bytecode: "..("%02X"):format(Lua_version):gsub("^.", "%0."))
+         print("Lua version of the source bytecode: "..tohex(Lua_version, 2):gsub("^.", "%0."))
          error(convert_to_enbi)
       end
    end
@@ -893,19 +900,22 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    end
 
    local function parse_proto(is_root_proto)
-      local all_upvalues, upv_qty, source = {}
+      local all_upvalues, upv_qty, source, debug_info = {}  -- debug_info is a string: either "stripped" or "included"
 
       if Lua_version ~= 0x52 then
          if Lua_version >= 0x53 and is_root_proto then
             upv_qty = read_byte(true)
          end
          source = read_string()
+         debug_info = source and "included" or "stripped"
       end
 
       -- [int line_start] debug info -- Line number in source code where chunk starts. 0 for the main chunk.
       local src_line_from = read_int()
+      assert(is_root_proto or src_line_from > 0)
       -- [int line_end] debug info -- Line number in source code where chunk stops. 0 for the main chunk.
       local src_line_to = read_int()
+      assert(src_line_to >= src_line_from)
 
       if Lua_version == 0x51 then
          upv_qty = read_byte(true)
@@ -946,7 +956,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          -- [instsize instruction]
          local opcode, A, B, C, file_offset, data_in_file = read_instruction()
          local instr_name = instr_names[opcode]
-         local location_in_file = ("+%04X: %02X %02X %02X %02X"):format(file_offset, data_in_file:byte(1, 4))
+         --local location_in_file = ("+%04X: %02X %02X %02X %02X"):format(file_offset, data_in_file:byte(1, 4))
+         local location_in_file = "+"..tohex(file_offset, 4)..": "..tohex(data_in_file:byte(), 2).." "..tohex(data_in_file:byte(2), 2).." "..tohex(data_in_file:byte(3), 2).." "..tohex(data_in_file:byte(4), 2)
          all_instructions[j] = {opcode = opcode, A = A, B = B, C = C, name = instr_name, location_in_file = location_in_file}
       end
 
@@ -1008,7 +1019,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          if const_type_id == 4 then
             -- type 4:  string
             const_type = "string"
-            const_value, file_offset = read_string()
+            const_value, file_offset = assert(read_string())
             data_in_file = const_value
             assert(const_value, "String is absent")
             const_value_as_text = serialize_string_value(const_value)
@@ -1055,9 +1066,10 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          else
             error("Unknown constant type = "..const_type_id)
          end
-         local location_in_file = ("+%04X:Size=%X:"):format(file_offset, #data_in_file)
+         --local location_in_file = ("+%04X:Size=%X:"):format(file_offset, #data_in_file)
+         local location_in_file = "+"..tohex(file_offset, 4)..":Size="..tohex(#data_in_file)..":"
          for j = 1, math.min(8, #data_in_file) do
-            location_in_file = location_in_file..(" %02X"):format(data_in_file:byte(j))
+            location_in_file = location_in_file.." "..tohex(data_in_file:byte(j), 2)
          end
          local target_length = #"+FFFF:Size=8: 01 02 03 04 05 06 07 08"
          if #data_in_file > 8 or #location_in_file > target_length then
@@ -1088,18 +1100,30 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       local protos_qty = read_int()
       local all_protos = {}
       for j = 1, protos_qty do
-         all_protos[j] = parse_proto()
+         local proto, debug_info_in_proto = parse_proto()
+         all_protos[j] = proto
+         debug_info = debug_info or debug_info_in_proto
+         assert(debug_info == debug_info_in_proto)
       end
 
       if Lua_version == 0x52 then
          parse_upvalues()
          -- [string source] | debug info
          source = read_string()
+         local new_debug_info = source and "included" or "stripped"
+         debug_info = debug_info or new_debug_info
+         assert(debug_info == new_debug_info)
       end
+
+      -- at this point we know for sure whether this bytecode has debug info or not
+      assert(debug_info == "stripped" or debug_info == "included")
 
       -- [int nlines]
       local lines_qty = read_int()
-      assert(lines_qty == 0 or lines_qty == instr_qty)
+      assert(
+         debug_info == "stripped" and lines_qty == 0 or
+         debug_info == "included" and lines_qty == instr_qty
+      )
       for j = 1, lines_qty do
          -- [int line]
          all_instructions[j].src_line_no = read_int()
@@ -1107,12 +1131,16 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- [int nlocals]
       local locals_qty = read_int()
+      assert(
+         debug_info == "stripped" and locals_qty == 0 or
+         debug_info == "included" and locals_qty >= arguments_qty + (has_local_arg and 1 or 0)
+      )
       local all_locals = {}
       do
          local regs = {[0] = math.huge}
          for j = 1, locals_qty do
             -- [string name]  debug info
-            local local_var_name = read_string()
+            local local_var_name = assert(read_string())
             -- [int startpc]  It comes into scope at instruction #startpc
             local start_pc = read_int() + 1
             -- [int endpc]    It goes out of scope at instruction #endpc
@@ -1129,10 +1157,13 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- [int nupvalnames]
       local upval_names_qty = read_int()
-      assert(upval_names_qty == 0 or upval_names_qty == upv_qty)
+      assert(
+         debug_info == "stripped" and upval_names_qty == 0 or
+         debug_info == "included" and upval_names_qty == upv_qty
+      )
       for j = 1, upval_names_qty do
          -- [string name]  debug info
-         all_upvalues[j].var_name = read_string()
+         all_upvalues[j].var_name = assert(read_string())
       end
       if src_line_from == 0 and Lua_version >= 0x52 and upv_qty == 1 and not all_upvalues[1].var_name then
          all_upvalues[1].var_name = "_ENV"
@@ -1154,7 +1185,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       end
 
       -- Disassembling (preparing fields instr_as_luac and instr_as_text) without resolving upvalue, local, const names
-      local data_items_ahead, data_descr = 0     -- ïðè óñòàíîâêå íîâîãî çíà÷åíèÿ data_items_ahead íóæíî ÿâíî ïðèñâàèâàòü data_descr
+      local data_items_ahead, data_descr = 0
       local last_closure_51_pc, last_closure_51_upvalues, pc_after_TFORLOOP51
       for pc = 1, instr_qty do
          local instr = all_instructions[pc]
@@ -1491,8 +1522,11 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          all_instructions = all_instructions,
          protos_qty = protos_qty,
          all_protos = all_protos,
-      }
+      },
+      debug_info
    end
+
+   local root_proto, debug_info = parse_proto(true)
 
    return convert_to_enbi and table.concat(target_bytecode) or {
       -- bytecode object
@@ -1504,9 +1538,12 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          bytes_per_lua_int = bytes_per_lua_int,
          bytes_per_lua_float = bytes_per_lua_float,
       },
-      root_proto = parse_proto(true)
+      root_proto = root_proto,
+      debug_info_is_stripped = debug_info == "stripped"
    }
 end
+
+------------------------------ DISPLAY ------------------------------
 
 local function rpad(s, len, filler)
    filler = filler or " "
@@ -1535,10 +1572,10 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, subfu
       Print(indent.."************ Function#"..subfunc_idx.."   (full path: "..path..")")
    else
       path = "main"
-      Print(indent.."************ MAIN FUNCTION")
+      Print(indent.."************ Main Function")
    end
    if proto_object.source then
-      Print(indent.."Source: "..proto_object.source)
+      Print(indent.."Source: "..proto_object.source:gsub("%s+", " "))
    end
    if proto_object.src_line_from ~= 0 then
       Print(indent
@@ -1659,14 +1696,14 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, subfu
    end
 end
 
-local function bytecode_object_as_string(bytecode_object)
+local function get_bytecode_listing(bytecode_object)
    local printed_lines = {}
 
    local function Print(line)
       table.insert(printed_lines, line or "")
    end
 
-   Print("Lua version: "..("%02X"):format(bytecode_object.Lua_version):gsub("^.", "%0."))
+   Print("Lua version: "..tohex(bytecode_object.Lua_version, 2):gsub("^.", "%0."))
    local enbi = bytecode_object.enbi
    local enbi_as_string =
       (enbi.is_LE and "L" or "B")
@@ -1675,25 +1712,42 @@ local function bytecode_object_as_string(bytecode_object)
       ..(enbi.bytes_per_lua_int or 0)
       ..(enbi.bytes_per_lua_float or 0)
    Print('EnBi = "'..enbi_as_string..'" (endianness and bitness of this bytecode)')
-   Print("  Endianness: "..(enbi.is_LE and "LE" or "BE"))
-   Print("  C int size = "..enbi.bytes_per_int)
-   Print("  C pointer size = "..enbi.bytes_per_pointer)
-   Print("  Lua integer size = "..(enbi.bytes_per_lua_int or 0))
-   Print("  Lua float size = "..(enbi.bytes_per_lua_float or 0))
+   Print("  Endianness          = "..(enbi.is_LE and "L (little-endian)" or "B (big-endian)"))
+   Print("  Size of C int       = "..enbi.bytes_per_int)
+   Print("  Size of C pointer   = "..enbi.bytes_per_pointer)
+   Print("  Size of Lua integer = "..(enbi.bytes_per_lua_int or 0))
+   Print("  Size of Lua float   = "..(enbi.bytes_per_lua_float or 0))
+   Print("Debug info: "..(bytecode_object.debug_info_is_stripped and "stripped" or "included"))
    print_proto_object(Print, bytecode_object.root_proto, bytecode_object.Lua_version, 0)
    Print()
-   return table.concat(printed_lines, "\n")
+   return table.concat(printed_lines, "\n"), enbi_as_string
 end
 
+local function get_decompiled_source(bytecode_object)
+   return "Not implemented yet"
+end
 
-local function bcviewer(bytecode_as_string_or_loader)
-   local ok, bytecode_description = pcall(
-      function(ldr)
-         return bytecode_object_as_string(parse_or_convert_bytecode(ldr))
-      end,
-      bytecode_as_string_or_loader
-   )
-   return ok and bytecode_description or "ERROR parsing bytecode\n"..tostring(bytecode_description), "Under construction"
+local function bcviewer(bytecode_as_string_or_loader, target_enbi)
+   if target_enbi then
+      -- convert bytecode to target EnBi and return converted bytecode as binary string
+      return parse_or_convert_bytecode(bytecode_as_string_or_loader, target_enbi)
+   else
+      -- return bytecode listing and decompiled source
+      local ok, bytecode_listing, decompiled_source, version, current_enbi = pcall(
+         function ()
+            local bytecode_object = parse_or_convert_bytecode(bytecode_as_string_or_loader)
+            local listing, enbi = get_bytecode_listing(bytecode_object)
+            local decomp = get_decompiled_source(bytecode_object)
+            return listing, decomp, bytecode_object.Lua_version, enbi
+         end
+      )
+      if ok then
+         return bytecode_listing, decompiled_source, version, current_enbi
+      else
+         local err_text = "ERROR parsing bytecode\n"..tostring(bytecode_listing)
+         return err_text, err_text
+      end
+   end
 end
 
 return bcviewer
