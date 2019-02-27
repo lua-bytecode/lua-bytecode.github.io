@@ -54,17 +54,32 @@
 
             function Converter.onchange()
                local enbi = Converter.value
+
+               window:alert(tostring(enbi).."\n"..tostring(window.saveAs).."\n"..tostring(filename).."\n"..type(filename))
+
                if listing_is_displayed_now and enbi and enbi ~= "none" then
                   bytecode_loader()   -- reset reading position to beginning of the bytecode
                   local ok, converted_bytecode = pcall(bcviewer, bytecode_loader, enbi)  -- convert bytecode
                   if ok then
                      -- convert Lua binary string to JS Uint8Array
+
+                     window:alert("1")
+
                      local byte_array = js.new(window.Uint8Array, #converted_bytecode)
+
+                     window:alert("2")
+
                      for j = 1, #converted_bytecode do
                         byte_array[j - 1] = converted_bytecode:byte(j)
                      end
+
+                     window:alert("3")
+
                      -- save Uint8Array to local file using FileSaver.js
                      window:saveAs(js.new(window.Blob, window:Array(byte_array), {type = "application/octet-stream"}), filename.."."..enbi..".luac")
+
+                     window:alert("4")
+
                   else
                      local err_text = tostring(converted_bytecode)
                      window:alert('ERROR converting bytecode to EnBi "'..enbi..'":\n'..err_text)
