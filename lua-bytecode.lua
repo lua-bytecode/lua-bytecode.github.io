@@ -1,6 +1,6 @@
 -- lua-bytecode.lua
 
--- Version: 2019-02-27
+-- Version: 2019-03-13
 
 local dot = assert(tostring(5.5):match"5(%p)5")
 do
@@ -252,7 +252,7 @@ do
 
 end
 
-local serialize_string_value, serialize_string_key
+local serialize_string_value, serialize_string_key, is_correct_identifier
 do
    local escapings={["\a"]="\\a", ["\b"]="\\b", ["\t"]="\\t", ["\n"]="\\n", ["\v"]="\\v", ["\f"]="\\f", ["\r"]="\\r", ['"']='\\"', ["\\"]="\\\\"}
 
@@ -266,10 +266,16 @@ do
       ["in"]=0, ["local"]=0, ["nil"]=0, ["not"]=0, ["or"]=0, ["repeat"]=0, ["return"]=0, ["then"]=0, ["true"]=0, ["until"]=0, ["while"]=0
    }
 
+   function is_correct_identifier(str, Lua_version)
+      return
+         str:find"^[A-Za-z_][A-Za-z0-9_]*$" and not is_keyword[str]
+         or Lua_version == 0x51 and str == "goto"
+   end
+
    function serialize_string_key(key)
       -- ["key"] or .key ?
       assert(type(key) == "string")
-      return key:find"^[%a_][%w_]*$" and not is_keyword[key] and "."..key or "["..serialize_string_value(key).."]"
+      return is_correct_identifier(key) and "."..key or "["..serialize_string_value(key).."]"
    end
 
 end
@@ -781,13 +787,13 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                   local v1, v2 = range:match((("^(@)%-(@)$"):gsub("@", version_pattern)))
                   -- "ver", "ver+", "ver-"
                   local v3, dir = range:match((("^(@)([-+]?)$"):gsub("@", version_pattern)))
-                  assert(v1 or v3, "Wrong version mark "..word)
+                  assert(v1 or v3, "Invalid version mark "..word)
                   is_relevant = is_relevant
                      or v1 and Lua_version >= tonumber(v1, 16) and Lua_version <= tonumber(v2, 16)
                      or v3 and (
-                        dir == "+" and Lua_version >= tonumber(v3, 16) or
-                        dir == "-" and Lua_version <= tonumber(v3, 16) or
-                        dir == "" and Lua_version == tonumber(v3, 16)
+                           dir == "+" and Lua_version >= tonumber(v3, 16)
+                        or dir == "-" and Lua_version <= tonumber(v3, 16)
+                        or dir == ""  and Lua_version == tonumber(v3, 16)
                      )
                end
             end
@@ -863,7 +869,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    end
 
    if Lua_version >= 0x52 then
-      -- 19 93 0D 0A 1A 0A   Lua magic (used to detect presence of EOL conversion)
+      -- 19 93 0D 0A 1A 0A   Lua magic (used to detect presence of text conversion)
       assert(read_block(6, true) == "\25\147\13\10\26\10", "Wrong file header")
    end
 
@@ -902,12 +908,17 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    local function parse_proto(is_root_proto)
       local all_upvalues, upv_qty, source, debug_info = {}  -- debug_info is a string: either "stripped" or "included"
 
+      if Lua_version >= 0x53 and is_root_proto then
+         upv_qty = read_byte(true)
+      end
+
       if Lua_version ~= 0x52 then
-         if Lua_version >= 0x53 and is_root_proto then
-            upv_qty = read_byte(true)
-         end
          source = read_string()
-         debug_info = source and "included" or "stripped"
+         if source then
+            debug_info = "included"
+         elseif is_root_proto then
+            debug_info = "stripped"
+         end
       end
 
       -- [int line_start] debug info -- Line number in source code where chunk starts. 0 for the main chunk.
@@ -925,9 +936,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       end
 
       -- [u8 nparams] -- Number of parameters
-      local arguments_qty = read_byte(true)
+      local parameters_qty = read_byte(true)
       if src_line_from == 0 then  -- for main chunk
-         assert(arguments_qty == 0)
+         assert(parameters_qty == 0)
       end
       -- [u8 varargflags] -- vararg flag
       local is_vararg, has_local_arg, local_arg_contains_table
@@ -942,6 +953,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          local_arg_contains_table = n > 3
       else
          is_vararg = read_boolean(true)
+         if src_line_from == 0 then  -- for main chunk
+            assert(is_vararg)
+         end
       end
 
       -- [u8 nregisters] -- number of registers used by this function
@@ -1011,12 +1025,12 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- [int nconsts]
       local const_qty = read_int()
-      local all_consts = {}  -- [0..(n-1)] = {type="nil/boolean/string/float/integer", value=, value_as_text=, location_in_file=}
+      local all_consts = {}  -- [1..n] = {type="nil/boolean/string/float/integer", value=, value_as_text=, location_in_file=}
       for j = 1, const_qty do
          -- [u8 type]
          local const_type_id = read_byte(true)
          local const_type, const_value, const_value_as_text, file_offset, data_in_file
-         if const_type_id == 4 then
+         if const_type_id == 4 or const_type_id == 4+16 then
             -- type 4:  string
             const_type = "string"
             const_value, file_offset = assert(read_string())
@@ -1024,8 +1038,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             assert(const_value, "String is absent")
             const_value_as_text = serialize_string_value(const_value)
          elseif const_type_id == 3 or const_type_id == 3+16 then
+            -- type 3:  number
             if const_type_id == 3 and bytes_per_lua_float then
-               -- type 3:  number(5.2-), float(5.3+)
                const_type = "float"
                const_value, file_offset, data_in_file = read_lua_float()
                local predicted_float8
@@ -1040,7 +1054,6 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                   end
                end
             else
-               -- type 3+16:  integer(5.3+)
                const_type = "integer"
                const_value, file_offset, data_in_file = read_lua_int()
                const_value_as_text = tostring(const_value)
@@ -1110,20 +1123,22 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          parse_upvalues()
          -- [string source] | debug info
          source = read_string()
-         local new_debug_info = source and "included" or "stripped"
+         local new_debug_info
+         if source then
+            new_debug_info = "included"
+         elseif is_root_proto then
+            new_debug_info = "stripped"
+         end
          debug_info = debug_info or new_debug_info
-         assert(debug_info == new_debug_info)
+         assert(debug_info == (new_debug_info or debug_info))
       end
-
-      -- at this point we know for sure whether this bytecode has debug info or not
-      assert(debug_info == "stripped" or debug_info == "included")
 
       -- [int nlines]
       local lines_qty = read_int()
-      assert(
-         debug_info == "stripped" and lines_qty == 0 or
-         debug_info == "included" and lines_qty == instr_qty
-      )
+      assert(lines_qty == 0 or lines_qty == instr_qty)
+      local new_debug_info = lines_qty > 0 and "included" or "stripped"
+      debug_info = debug_info or new_debug_info
+      assert(debug_info == new_debug_info)
       for j = 1, lines_qty do
          -- [int line]
          all_instructions[j].src_line_no = read_int()
@@ -1132,8 +1147,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       -- [int nlocals]
       local locals_qty = read_int()
       assert(
-         debug_info == "stripped" and locals_qty == 0 or
-         debug_info == "included" and locals_qty >= arguments_qty + (has_local_arg and 1 or 0)
+         debug_info == "included" and locals_qty >= parameters_qty + (has_local_arg and 1 or 0) or
+         debug_info == "stripped" and locals_qty == 0
       )
       local all_locals = {}
       do
@@ -1158,14 +1173,15 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       -- [int nupvalnames]
       local upval_names_qty = read_int()
       assert(
-         debug_info == "stripped" and upval_names_qty == 0 or
-         debug_info == "included" and upval_names_qty == upv_qty
+         debug_info == "included" and upval_names_qty == upv_qty or
+         debug_info == "stripped" and upval_names_qty == 0
       )
       for j = 1, upval_names_qty do
          -- [string name]  debug info
          all_upvalues[j].var_name = assert(read_string())
       end
-      if src_line_from == 0 and Lua_version >= 0x52 and upv_qty == 1 and not all_upvalues[1].var_name then
+      if src_line_from == 0 and Lua_version >= 0x52 and upv_qty == 1 and all_upvalues[1].in_locals and all_upvalues[1].index == 0 and not all_upvalues[1].var_name then
+         -- if debug info is stripped, set the name of main chunk's upvalue
          all_upvalues[1].var_name = "_ENV"
 
          local function set_name_for_the_ENV_upvalue(all_protos, upv_index)
@@ -1507,7 +1523,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          source = source,
          src_line_from = src_line_from,
          src_line_to = src_line_to,
-         arguments_qty = arguments_qty,
+         parameters_qty = parameters_qty,
          is_vararg = is_vararg,
          has_local_arg = has_local_arg,
          local_arg_contains_table = local_arg_contains_table,
@@ -1564,7 +1580,7 @@ local function lpad(s, len, filler)
 end
 
 
-local function print_proto_object(Print, proto_object, Lua_version, depth, subfunc_idx, path)
+local function print_proto_object(Print, proto_object, Lua_version, depth, debug_info_is_stripped, subfunc_idx, path)
    local indent = ("\t"):rep(depth)
    Print()
    if depth > 0 then
@@ -1578,60 +1594,39 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, subfu
       Print(indent.."Source: "..proto_object.source:gsub("%s+", " "))
    end
    if proto_object.src_line_from ~= 0 then
-      Print(indent
-         .."Source line#: "..proto_object.src_line_from
+      Print(indent.."Source line#: "..proto_object.src_line_from
          ..(proto_object.src_line_from == proto_object.src_line_to and "" or ".."..proto_object.src_line_to)
       )
    end
-   Print(indent.."Arguments: "..proto_object.arguments_qty)
+   Print(indent.."Parameters: "..proto_object.parameters_qty)
    Print(indent.."Is vararg: "..(proto_object.is_vararg and "yes" or "no"))
    if proto_object.is_vararg and Lua_version == 0x51 then
-      Print(indent.."Local arg: "..(
-         proto_object.has_local_arg
-            and (proto_object.local_arg_contains_table and "contains array of arguments" or "contains nil")
-            or "absent"
-      ))
+      Print(indent.."Local variable 'arg': "..(proto_object.has_local_arg
+         and (proto_object.local_arg_contains_table and "contains array of arguments" or "contains nil") or "absent")
+      )
    end
    Print(indent.."VM registers needed: "..proto_object.registers_needed)
    Print(indent.."Constants: "..proto_object.const_qty)
    for j = 1, proto_object.const_qty do
-      Print(indent.."  "
-         ..proto_object.all_consts[j].location_in_file
-         ..rpad("   Const#"..j, 12)
-         .." "..rpad(proto_object.all_consts[j].type, 9)
-         .." "..proto_object.all_consts[j].value_as_text
-      )
+      local const = proto_object.all_consts[j]
+      Print(indent.."  "..const.location_in_file..rpad("   Const#"..j, 12).." "..rpad(const.type, 9).." "..const.value_as_text)
    end
    Print(indent.."Upvalues: "..proto_object.upv_qty)
    for j = 1, proto_object.upv_qty do
-      Print(indent.."  "
-         ..rpad("U"..j, 3).." is enclosing function's "
-         ..rpad(proto_object.all_upvalues[j].in_locals
-            and "R"..proto_object.all_upvalues[j].index
-            or "Upvalue#"..proto_object.all_upvalues[j].index, 11)
-         .." "..(proto_object.all_upvalues[j].var_name and "name: "..proto_object.all_upvalues[j].var_name or "")
+      local upv = proto_object.all_upvalues[j]
+      Print(indent.."  "..rpad("U"..j, 3).." is enclosing function's "
+         ..rpad(upv.in_locals and "R"..upv.index or "Upvalue#"..upv.index, 11)
+         ..(upv.var_name and " name: "..upv.var_name or "")
       )
    end
-   if proto_object.locals_qty ~= 0 then
+   if not debug_info_is_stripped then
       Print(indent.."Locals: "..proto_object.locals_qty)
       for j = 1, proto_object.locals_qty do
-         Print(indent.."  "
-            ..rpad("Local#"..j, 9)
-            .." R"..rpad(proto_object.all_locals[j].reg_no, 3)
-            .." pc:<"
-            ..rpad(
-               proto_object.all_locals[j].def_pc..";"..(
-                  proto_object.all_locals[j].start_pc > proto_object.all_locals[j].end_pc
-                  and
-                     ""
-                  or
-                     proto_object.all_locals[j].start_pc..(
-                        proto_object.all_locals[j].start_pc == proto_object.all_locals[j].end_pc
-                        and ""
-                        or ".."..proto_object.all_locals[j].end_pc
-                     )
-               )..">", 14)
-            .." name: "..proto_object.all_locals[j].var_name
+         local loc = proto_object.all_locals[j]
+         Print(indent.."  "..rpad("Local#"..j, 9).." R"..rpad(loc.reg_no, 3)
+            .." def:<"..rpad((loc.def_pc == 0 and "" or loc.def_pc)..">", 4)
+            .." scope:<"..rpad((loc.start_pc > loc.end_pc and "" or loc.start_pc..(loc.start_pc == loc.end_pc and "" or ".."..loc.end_pc))..">", 9)
+            .." name: "..loc.var_name
          )
       end
    end
@@ -1639,7 +1634,7 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, subfu
    local function insert_consts_and_varnames(instr_as_text, pc, all_consts, all_locals, all_upvalues, arg_reg_no)
       local comments = {}
       instr_as_text = instr_as_text
-         :gsub("^(.-)%s*(%-%-.*)$", "%1\0%2")
+         :gsub("^(.-)%s+(%-%-.*)$", "%1\0%2")
          :gsub("(@+)(%a*#?)(%d*)",
             function(dogs, word, num)
                local suffix = ""
@@ -1687,12 +1682,12 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, subfu
       Print(indent.."  "..instr.location_in_file.."   "
          ..(instr.src_line_no and rpad("line#"..instr.src_line_no, 9).." " or "")
          ..rpad(instr.instr_as_luac, 20).." "..lpad("<"..pc..">", 6).."   "
-         ..insert_consts_and_varnames(instr.instr_as_text, pc, proto_object.all_consts, proto_object.all_locals, proto_object.all_upvalues, proto_object.has_local_arg and proto_object.arguments_qty)
+         ..insert_consts_and_varnames(instr.instr_as_text, pc, proto_object.all_consts, proto_object.all_locals, proto_object.all_upvalues, proto_object.has_local_arg and proto_object.parameters_qty)
       )
    end
    Print(indent.."Functions: "..proto_object.protos_qty)
    for j = 1, proto_object.protos_qty do
-      print_proto_object(Print, proto_object.all_protos[j], Lua_version, depth + 1, j, path)
+      print_proto_object(Print, proto_object.all_protos[j], Lua_version, depth + 1, debug_info_is_stripped, j, path)
    end
 end
 
@@ -1718,7 +1713,7 @@ local function get_bytecode_listing(bytecode_object)
    Print("  Size of Lua integer = "..(enbi.bytes_per_lua_int or 0))
    Print("  Size of Lua float   = "..(enbi.bytes_per_lua_float or 0))
    Print("Debug info: "..(bytecode_object.debug_info_is_stripped and "stripped" or "included"))
-   print_proto_object(Print, bytecode_object.root_proto, bytecode_object.Lua_version, 0)
+   print_proto_object(Print, bytecode_object.root_proto, bytecode_object.Lua_version, 0, bytecode_object.debug_info_is_stripped)
    Print()
    return table.concat(printed_lines, "\n"), enbi_as_string
 end

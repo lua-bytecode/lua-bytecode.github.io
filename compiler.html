@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+   <head>
+      <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+      <title>Enter Lua script and view its bytecode</title>
+      <style>
+         html,body {
+            height: 100%;
+         }
+         * {
+            margin: 0;
+            padding: 0;
+         }
+         .gutter {
+            background-color: #eee;
+            background-repeat: no-repeat;
+            background-position: 50%;
+            background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAeCAYAAADkftS9AAAAIklEQVQoU2M4c+bMfxAGAgYYmwGrIIiDjrELjpo5aiZeMwF+yNnOs5KSvgAAAABJRU5ErkJggg==');
+            cursor:col-resize;
+         }
+         .split, .gutter.gutter-horizontal {
+            float: left;
+            height: calc(100% - 4px);
+         }
+         .split {
+            white-space: pre;
+            resize: none;
+            border: none;
+            width: 50%;
+         }
+      </style>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/split.js/1.5.9/split.min.js" type="text/javascript"></script>  <!-- (c) split.js.org -->
+      <script src="https://github.com/fengari-lua/fengari-web/releases/download/v0.1.4/fengari-web.js" type="text/javascript"></script>  <!-- (c) fengari.io -->
+   </head>
+   <body>
+      <textarea class="split" style="background:#fff;" id="UserScript">
+  -- Enter your Lua script here
+
+</textarea><div class="gutter gutter-horizontal"></div><textarea class="split" style="background:#ffe;" id="ViewerOutput" readonly>JavaScript must be enabled
+</textarea>
+      <script type="application/lua">
+         local js = require"js"
+         local window = js.global
+         local document = window.document
+         local UserScript = document:getElementById"UserScript"
+         local ViewerOutput = document:getElementById"ViewerOutput"
+         local err_message
+         if window.Split then
+            window:Split(window:Array('#UserScript', '#ViewerOutput'), {gutterSize = 15})
+            local ok, bcviewer = pcall(require, "lua-bytecode")
+            if ok then
+               local default_output = "\n  1. Type some Lua code in the left pane (Lua version is 5.3).\n\n  2. To view bytecode listing:\n       stop editing and wait one second\n     OR\n       press 'Insert' key (for the impatient).\n\n  3. Lua script will be compiled to bytecode by Fengari (a Lua\n     interpreter written in JS and running inside your browser).\n\n  4. Bytecode listing (or compilation error message) will be\n     displayed in the right pane.\n\n  5. This webpage only compiles your script to a bytecode.\n     It doesn't run your script.\n"
+               ViewerOutput.textContent = default_output
+
+               local function compile(script)
+                  local func, err_message = load(script, "Lua script", "t")
+                  if func then
+                     return string.dump(func)
+                  else
+                     return nil, tostring(err_message)
+                  end
+               end
+
+               local empty_bytecode_length = #compile""
+               local co, last_input_time, compile_now
+
+               local function current_time()
+                  return window.Date:now()
+               end
+
+               function UserScript.oninput()
+                  last_input_time = current_time()
+               end
+
+               function UserScript:onkeydown(event)
+                  if event and event.key == "Insert" then
+                     compile_now = true
+                  end
+               end
+
+               local function awake()
+                  assert(coroutine.resume(co))
+               end
+
+               co = coroutine.create(
+                  function ()
+                     while true do
+                        window:setTimeout(awake, 200)
+                        coroutine.yield()
+                        if compile_now or last_input_time and current_time() - last_input_time > 1000 then
+                           last_input_time, compile_now = nil
+                           local bytecode, err_message = compile(UserScript.value)
+                           if not bytecode then
+                              bytecode = "COMPILATION ERROR:\n"..err_message
+                           elseif #bytecode == empty_bytecode_length then
+                              bytecode = default_output
+                           else
+                              bytecode = bcviewer(bytecode)
+                           end
+                           ViewerOutput.textContent = bytecode
+                        end
+                     end
+                  end
+               )
+               awake()
+            else
+               err_message = 'ERROR: Failed to load module "lua-bytecode.lua"\n'..tostring(bcviewer)
+            end
+         else
+            err_message = 'ERROR: Failed to load "split.min.js"\n'
+         end
+         if err_message then
+            UserScript.textContent = err_message
+            ViewerOutput.textContent = err_message
+         end
+      </script>
+   </body>
+</html>
