@@ -1,6 +1,6 @@
 -- lua-bytecode.lua
 
--- Version: 2019-03-13
+-- Version: 2019-03-15
 
 local dot = assert(tostring(5.5):match"5(%p)5")
 do
@@ -1623,8 +1623,8 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
       Print(indent.."Locals: "..proto_object.locals_qty)
       for j = 1, proto_object.locals_qty do
          local loc = proto_object.all_locals[j]
-         Print(indent.."  "..rpad("Local#"..j, 9).." R"..rpad(loc.reg_no, 3)
-            .." def:<"..rpad((loc.def_pc == 0 and "" or loc.def_pc)..">", 4)
+         Print(indent.."  "..rpad("Local#"..j, 9).." R"..rpad(loc.reg_no, 3).." "
+            ..rpad(j < proto_object.parameters_qty + (proto_object.has_local_arg and 2 or 1) and "parameter" or "def:<"..(loc.def_pc == 0 and "" or loc.def_pc)..">", 10)
             .." scope:<"..rpad((loc.start_pc > loc.end_pc and "" or loc.start_pc..(loc.start_pc == loc.end_pc and "" or ".."..loc.end_pc))..">", 9)
             .." name: "..loc.var_name
          )

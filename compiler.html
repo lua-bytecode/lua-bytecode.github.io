@@ -42,11 +42,20 @@
          local js = require"js"
          local window = js.global
          local document = window.document
-         local UserScript = document:getElementById"UserScript"
+         local UserScript   = document:getElementById"UserScript"
          local ViewerOutput = document:getElementById"ViewerOutput"
          local err_message
          if window.Split then
-            window:Split(window:Array('#UserScript', '#ViewerOutput'), {gutterSize = 15})
+            --window:Split(window:Array('#UserScript', '#ViewerOutput'), {gutterSize = 15, minSize = 270, sizes = window:Array(25, 75), snapOffset = 0, expandToMin = true})
+            do
+               local options = js.new(window.Object)
+               options.gutterSize = 15
+               options.minSize = 270
+               options.sizes = window:Array(25, 75)
+               options.snapOffset = 0
+               options.expandToMin = true
+               window:Split(window:Array('#UserScript', '#ViewerOutput'), options)
+            end
             local ok, bcviewer = pcall(require, "lua-bytecode")
             if ok then
                local default_output = "\n  1. Type some Lua code in the left pane (Lua version is 5.3).\n\n  2. To view bytecode listing:\n       stop editing and wait one second\n     OR\n       press 'Insert' key (for the impatient).\n\n  3. Lua script will be compiled to bytecode by Fengari (a Lua\n     interpreter written in JS and running inside your browser).\n\n  4. Bytecode listing (or compilation error message) will be\n     displayed in the right pane.\n\n  5. This webpage only compiles your script to a bytecode.\n     It doesn't run your script.\n"
@@ -68,7 +77,7 @@
                   return window.Date:now()
                end
 
-               function UserScript.oninput()
+               function UserScript:oninput()
                   last_input_time = current_time()
                end
 
