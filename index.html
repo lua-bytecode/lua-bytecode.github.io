@@ -43,7 +43,8 @@
          if not window.saveAs then
             window:alert("FileSaver.js failed to load.\nYou will not be able to convert bytecodes.")
          end
-         local ok, bcviewer = pcall(require, "lua-bytecode")
+         -- local ok, bcviewer = pcall(require, "lua-bytecode")
+         local ok, bcviewer = pcall(dofile, "https://raw.githubusercontent.com/lua-bytecode/lua-bytecode.github.io/master/lua-bytecode.lua")
          if ok then
 
             local enbi_descriptions = {
