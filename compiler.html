@@ -58,7 +58,7 @@
             end
             local ok, bcviewer = pcall(require, "lua-bytecode")
             if ok then
-               local default_output = "\n  1. Type some Lua code in the left pane (Lua version is 5.3).\n\n  2. To view bytecode listing:\n       stop editing and wait one second\n     OR\n       press 'Insert' key (for the impatient).\n\n  3. Lua script will be compiled to bytecode by Fengari (a Lua\n     interpreter written in JS and running inside your browser).\n\n  4. Bytecode listing (or compilation error message) will be\n     displayed in the right pane.\n\n  5. This webpage only compiles your script to a bytecode.\n     It doesn't run your script.\n"
+               local default_output = "\n  1. Type some Lua code in the left pane.\n     Lua version is 5.3.\n\n  2. To view bytecode listing:\n       stop editing and wait one second\n     OR\n       press 'Insert' key (for the impatient).\n\n  3. Lua script will be compiled to bytecode by Fengari (a Lua\n     interpreter written in JS and running inside your browser).\n\n  4. Bytecode listing (or compilation error message) will be\n     displayed in the right pane.\n\n  5. This webpage only compiles your script to a bytecode.\n     It doesn't run your script.\n"
                ViewerOutput.textContent = default_output
 
                local function compile(script)
