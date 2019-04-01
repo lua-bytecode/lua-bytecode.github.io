@@ -22,30 +22,26 @@
          &nbsp; &nbsp;
          <input type="file" id="FilePicker">
          &nbsp; &nbsp;
-         <button type="button" id="Switch" style="display:none">.</button>
-         &nbsp; &nbsp;
          <select id="Converter" style="display:none">
             <option value="none">&nbsp; Convert to another EnBi &nbsp;</option>
          </select>
          &nbsp; &nbsp;
          <a href="compiler.html" target="_blank">Enter Lua script and view its bytecode</a>
       </div>
-      <!-- reducing textarea height by 4 pixels is required to hide vertical scrollbar on Chrome -->
+      <!-- reducing textarea height by 4 pixels is required to hide vertical scrollbar in Chrome -->
       <textarea style="width:100%;height:calc(100% - 54px);background:#ffe;white-space:pre;resize:none;border:none" id="ViewerOutput" readonly>JavaScript must be enabled</textarea>
       <script type="application/lua">
          local js = require"js"
          local window = js.global
          local document = window.document
-         local Switch       = document:getElementById"Switch"       -- button for switching views
-         local Converter    = document:getElementById"Converter"    -- selection box for converting
+         local Converter    = document:getElementById"Converter"    -- EnBi selection box for converting
          local FilePicker   = document:getElementById"FilePicker"   -- bytecode file chooser
          local ViewerOutput = document:getElementById"ViewerOutput" -- large text area
          ViewerOutput.textContent = "Fengari has been loaded"
          if not window.saveAs then
-            window:alert("FileSaver.js failed to load.\nYou will not be able to convert bytecodes.")
+            window:alert('"FileSaver.js" failed to load.\nYou will not be able to convert bytecodes.')
          end
-         -- local ok, bcviewer = pcall(require, "lua-bytecode")
-         local ok, bcviewer = pcall(dofile, "https://raw.githubusercontent.com/lua-bytecode/lua-bytecode.github.io/master/lua-bytecode.lua")
+         local ok, bcviewer = pcall(require, "lua-bytecode")
          if ok then
 
             local enbi_descriptions = {
@@ -60,17 +56,15 @@
                L4444 = " (x86 LUA_32BITS)",
                L4844 = " (x64 LUA_32BITS)",
             }
-            local nbsp = "\xC2\xA0"  -- U+00A0 non-breaking space
-            local name_padding = " "..nbsp.." "
-            local listing_is_displayed_now, filename, listing, decompiled, version, current_enbi, bytecode_loader
+            local filename, listing, version, current_enbi, bytecode_loader
 
             function Converter.onchange()
                local enbi = Converter.value
                Converter[0].selected = true
-               if listing_is_displayed_now and enbi and enbi ~= "none" then
+               if enbi and enbi ~= "none" then
                   bytecode_loader()   -- reset reading position to beginning of the bytecode
-                  local ok, converted_bytecode = pcall(bcviewer, bytecode_loader, enbi)  -- convert bytecode
-                  if ok then
+                  local converted_bytecode, err_text = bcviewer(bytecode_loader, enbi)  -- convert bytecode
+                  if converted_bytecode then
                      -- convert Lua binary string to JS Uint8Array
                      local byte_array = js.new(window.Uint8Array, #converted_bytecode)
                      for j = 1, #converted_bytecode do
@@ -79,27 +73,19 @@
                      -- save Uint8Array to local file using FileSaver.js
                      window:saveAs(js.new(window.Blob, window:Array(byte_array), {type = "application/octet-stream"}), filename.."."..enbi..".luac")
                   else
-                     local err_text = tostring(converted_bytecode)
-                     window:alert('ERROR converting bytecode to EnBi "'..enbi..'":\n'..err_text)
+                     window:alert(err_text)
                   end
                end
             end
 
             local function ForgetEverything()
-               listing_is_displayed_now, filename, listing, decompiled, version, current_enbi, bytecode_loader = nil
+               filename, listing, version, current_enbi, bytecode_loader = nil
                Converter.style.display = "none"
-               Switch.style.display = "none"
             end
 
-            local function UpdateOutput(display_listing)
-               if display_listing == nil then
-                  Switch.style.display = "inline"
-                  return UpdateOutput(true)
-               end
-               listing_is_displayed_now = display_listing
-               if display_listing then
-                  Switch.textContent = name_padding.."View Decompiled Source"..name_padding
-                  ViewerOutput.textContent = listing
+            local function UpdateOutput()
+               ViewerOutput.textContent = listing
+               if version then
                   local enbi_arr = {}
                   for _, e in ipairs{"L", "B"} do
                      for p = 4, 8, 4 do
@@ -126,19 +112,13 @@
                      Converter:remove(j)
                   end
                   for j, enbi in ipairs(enbi_arr) do
-                     Converter[j] = js.new(window.Option, name_padding..enbi..(enbi_descriptions[enbi] or ""), enbi)
+                     Converter[j] = js.new(window.Option, "\xC2\xA0 "..enbi..(enbi_descriptions[enbi] or ""), enbi)
                      Converter[j].disabled = (enbi == current_enbi)
                   end
                   Converter.style.display = "inline"
                else
-                  Converter.style.display = "none"
-                  Switch.textContent = name_padding.."View Bytecode Listing"..name_padding
-                  ViewerOutput.textContent = decompiled
+                  ForgetEverything()
                end
-            end
-
-            function Switch.onclick()
-               UpdateOutput(not listing_is_displayed_now)
             end
 
             function FilePicker.onchange()
@@ -157,7 +137,7 @@
                   end
 
                   function reader.onload()
-                     local result = reader.content or reader.result  -- it's for ie11: stackoverflow.com/a/32665193/2835973
+                     local result = reader.content or reader.result  -- it's for IE11: stackoverflow.com/a/32665193/2835973
                      local byte_array = js.new(window.Uint8Array, result)
                      local byte_index = 0
 
@@ -180,8 +160,8 @@
                         end
                      end
 
-                     filename, listing, decompiled, version, current_enbi = File.name, bcviewer(bytecode_loader)
-                     UpdateOutput(listing_is_displayed_now)
+                     filename, listing, version, current_enbi = File.name, bcviewer(bytecode_loader)
+                     UpdateOutput()
                   end
 
                   reader:readAsArrayBuffer(File)

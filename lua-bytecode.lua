@@ -1,6 +1,9 @@
 -- lua-bytecode.lua
 
--- Version: 2019-03-15
+-- PUC Lua 5.1, 5.2, 5.3 bytecode viewer and convertor
+-- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
+
+-- Version: 2019-04-01
 
 local dot = assert(tostring(5.5):match"5(%p)5")
 do
@@ -1718,29 +1721,29 @@ local function get_bytecode_listing(bytecode_object)
    return table.concat(printed_lines, "\n"), enbi_as_string
 end
 
-local function get_decompiled_source(bytecode_object)
-   return "Not implemented yet"
-end
-
 local function bcviewer(bytecode_as_string_or_loader, target_enbi)
    if target_enbi then
-      -- convert bytecode to target EnBi and return converted bytecode as binary string
-      return parse_or_convert_bytecode(bytecode_as_string_or_loader, target_enbi)
+      -- converts bytecode to target EnBi and returns converted bytecode as binary string (or nil, err_mes)
+      local ok, converted_bytecode = pcall(parse_or_convert_bytecode, bytecode_as_string_or_loader, target_enbi)
+      if ok then
+         return converted_bytecode
+      else
+         return nil, 'ERROR converting bytecode to EnBi "'..target_enbi..'"\n'..tostring(converted_bytecode)
+      end
    else
-      -- return bytecode listing and decompiled source
-      local ok, bytecode_listing, decompiled_source, version, current_enbi = pcall(
+      -- returns bytecode_listing, Lua_version_as_hex, EnBi_of_this_bytecode
+      local ok, bytecode_listing, version, current_enbi = pcall(
          function ()
             local bytecode_object = parse_or_convert_bytecode(bytecode_as_string_or_loader)
             local listing, enbi = get_bytecode_listing(bytecode_object)
-            local decomp = get_decompiled_source(bytecode_object)
-            return listing, decomp, bytecode_object.Lua_version, enbi
+            return listing, bytecode_object.Lua_version, enbi
          end
       )
       if ok then
-         return bytecode_listing, decompiled_source, version, current_enbi
+         return bytecode_listing, version, current_enbi
       else
          local err_text = "ERROR parsing bytecode\n"..tostring(bytecode_listing)
-         return err_text, err_text
+         return err_text
       end
    end
 end
