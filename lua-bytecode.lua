@@ -1,6 +1,6 @@
 -- lua-bytecode.lua
 
--- PUC Lua 5.1, 5.2, 5.3 bytecode viewer and convertor
+-- PUC Lua 5.1, 5.2, 5.3 bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
 -- Version: 2019-04-01
