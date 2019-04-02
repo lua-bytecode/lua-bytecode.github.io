@@ -3,7 +3,7 @@
 -- PUC Lua 5.1, 5.2, 5.3 bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-04-01
+-- Version: 2019-04-02
 
 local dot = assert(tostring(5.5):match"5(%p)5")
 do
@@ -1617,8 +1617,7 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
    Print(indent.."Upvalues: "..proto_object.upv_qty)
    for j = 1, proto_object.upv_qty do
       local upv = proto_object.all_upvalues[j]
-      Print(indent.."  "..rpad("U"..j, 3).." is enclosing function's "
-         ..rpad(upv.in_locals and "R"..upv.index or "Upvalue#"..upv.index, 11)
+      Print(indent.."  "..rpad("Upv#"..j.." is parent function's "..(upv.in_locals and "R"..upv.index or "Upv#"..upv.index), 42)
          ..(upv.var_name and " name: "..upv.var_name or "")
       )
    end
@@ -1656,14 +1655,19 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
                      suffix = "@arg"
                   end
                elseif word == "Const#" then
-                  local const = assert(all_consts[tonumber(num)]).value_as_text
-                  if #const < 50 then
+                  local const = assert(all_consts[tonumber(num)], "Const index is out of range")
+                  local const_value_as_text = const.value_as_text
+                  if #const_value_as_text < 50 then
                      table.insert(comments, word..num)
-                     word, num = const, ""
+                     local const_type = const.type
+                     if (const_type == "integer" or const_type == "float") and const_value_as_text:sub(1, 1) == "-" then
+                        const_value_as_text = "("..const_value_as_text..")"
+                     end
+                     word, num = const_value_as_text, ""
                   end
                elseif word == "Upvalue#" then
-                  word = "U"
-                  local upv = assert(all_upvalues[tonumber(num)]).var_name
+                  word = "Upv#"
+                  local upv = assert(all_upvalues[tonumber(num)], "Upvalue index is out of range").var_name
                   if upv then
                      suffix = "@"..upv
                   end
@@ -1676,7 +1680,7 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
       local text, orig_comment = instr_as_text:match"^(%Z+)%z(%Z+)$"
       text = text or instr_as_text
       comments = (#comments == 0 and "" or "   -- It's "..table.concat(comments, ", "))..(orig_comment and "   "..orig_comment or "")
-      return text..(comments == "" and "" or (" "):rep(28-#text:gsub("[\128-\191]", ""))..comments)
+      return text..(comments == "" and "" or (" "):rep(45-#text:gsub("[\128-\191]", ""))..comments)
    end
 
    Print(indent.."Instructions: "..proto_object.instr_qty)
