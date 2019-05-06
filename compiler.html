@@ -29,8 +29,66 @@
             cursor:col-resize;
          }
       </style>
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/split.js/1.5.9/split.min.js" type="text/javascript"></script>  <!-- (c) split.js.org -->
-      <script src="https://github.com/fengari-lua/fengari-web/releases/download/v0.1.4/fengari-web.js" type="text/javascript"></script>  <!-- (c) fengari.io -->
+
+      <!--
+         Split.js  (c)split.js.org
+      -->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/split.js/1.5.9/split.min.js" type="text/javascript"></script>
+
+      <!--
+         Fengari  (c)fengari.io
+      -->
+      <script src="https://github.com/fengari-lua/fengari-web/releases/download/v0.1.4/fengari-web.js" type="text/javascript"></script>
+
+      <!--
+         Workaround for Fengari bug  github.com/fengari-lua/fengari/issues/148
+         Fengari "almost works" on IE11: Fengari depends on a module which requires a polyfill for IE11
+      -->
+      <script type="text/javascript">
+         if (!String.prototype.repeat)
+            String.prototype.repeat = function(n) {
+               var r = '';
+               for (; n; n>>=1) {
+                  var s = s ? s+s : this;
+                  if (n%2) r+=s
+               }
+               return r
+            }
+      </script>
+
+      <!--
+         Workaround for Fengari bug  github.com/fengari-lua/fengari/issues/147
+         Omitted precision in string.format() raises an error instead of assuming 0
+      -->
+      <script type="application/lua">
+         local orig_string_format, gsub = string.format, string.gsub
+
+         function string.format(format, ...)
+            return
+               orig_string_format(
+                  gsub(format, "%%.-[%%%a]", function(s) return gsub(s, "%.([^%d*])", ".0%1") end),
+                  ...
+               )
+         end
+      </script>
+
+      <!--
+         Fengari out-of-the-box lacks very natural and useful function for converting a Lua table to JS dictionary
+         The following function was taken from  gist.github.com/daurnimator/5a7fa933e96e14333962093322e0ff95/
+      -->
+      <script type="application/lua">
+         local js = require"js"
+
+         function js.Object(Lua_table)
+            local o = js.new(js.global.Object)
+            for k, v in pairs(Lua_table) do
+               assert(type(k) == "string" or js.typeof(k) == "symbol", "JavaScript only has string and symbol keys")
+               o[k] = v
+            end
+            return o
+         end
+      </script>
+
    </head>
    <body>
       <textarea class="split" style="background:#fff;" id="UserScript">
@@ -46,16 +104,10 @@
          local ViewerOutput = document:getElementById"ViewerOutput"
          local err_message
          if window.Split then
-            --window:Split(window:Array('#UserScript', '#ViewerOutput'), {gutterSize = 15, minSize = 270, sizes = window:Array(25, 75), snapOffset = 0, expandToMin = true})
-            do
-               local options = js.new(window.Object)
-               options.gutterSize = 15
-               options.minSize = 270
-               options.sizes = window:Array(25, 75)
-               options.snapOffset = 0
-               options.expandToMin = true
-               window:Split(window:Array('#UserScript', '#ViewerOutput'), options)
-            end
+            window:Split(
+               window:Array("#UserScript", "#ViewerOutput"),
+               js.Object{gutterSize = 15, minSize = 270, sizes = window:Array(25, 75), snapOffset = 0, expandToMin = true}
+            )
             local ok, bcviewer = pcall(require, "lua-bytecode")
             if ok then
                local default_output = "\n  1. Type some Lua code in the left pane.\n     Lua version is 5.3.\n\n  2. To view bytecode listing:\n       stop editing and wait one second\n     OR\n       press 'Insert' key (for the impatient).\n\n  3. Lua script will be compiled to bytecode by Fengari (a Lua\n     interpreter written in JS and running inside your browser).\n\n  4. Bytecode listing (or compilation error message) will be\n     displayed in the right pane.\n\n  5. This webpage only compiles your script to a bytecode.\n     It doesn't run your script.\n"
@@ -116,7 +168,7 @@
                err_message = 'ERROR: Failed to load module "lua-bytecode.lua"\n'..tostring(bcviewer)
             end
          else
-            err_message = 'ERROR: Failed to load "split.min.js"\n'
+            err_message = 'ERROR: Failed to load "Split.js"\n'
          end
          if err_message then
             UserScript.textContent = err_message

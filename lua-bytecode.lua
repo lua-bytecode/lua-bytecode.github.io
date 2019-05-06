@@ -3,20 +3,20 @@
 -- PUC Lua 5.1, 5.2, 5.3 bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-04-02
+-- Version: 2019-05-06
 
-local dot = assert(tostring(5.5):match"5(%p)5")
+
+-- must have "double" Lua numbers
 do
    local x = 2^53
    assert(x - (x-1) == 1 and (x+1) - x ~= 1, "Floating point numbers must be 'double'")
-   local s = "-5"..dot.."5"
-   assert(tostring(-5.5) == s and tonumber(s) == -5.5)
 end
 
-local function tohex(n, min_digits)
-   -- this function is needed to workaround IE11-incompatibility of Fengari's string.format()
-   local s = ("%X"):format(n)
-   return ("0"):rep((min_digits or 1) - #s)..s
+-- determine decimal point
+local dot = assert(tostring(5.5):match"5(%p)5", "Failed to determine decimal point symbol in the current locale")
+do
+   local s = "-5"..dot.."5"
+   assert(tostring(-5.5) == s and tonumber(s) == -5.5, "Failed to determine decimal point symbol in the current locale")
 end
 
 local function round_float8_to_float4(x)
@@ -88,6 +88,7 @@ do
    end
 
    local function float_to_compact_str(num, bytes_per_float)
+      -- "compact" means shortest string representation which is a correct Lua expression, without ".0" suffix for integers
       if bytes_per_float == 4 then
          num = round_float8_to_float4(num)
       end
@@ -260,8 +261,7 @@ do
    local escapings={["\a"]="\\a", ["\b"]="\\b", ["\t"]="\\t", ["\n"]="\\n", ["\v"]="\\v", ["\f"]="\\f", ["\r"]="\\r", ['"']='\\"', ["\\"]="\\\\"}
 
    function serialize_string_value(str)
-      -- return '"'..str:gsub('[%c"\\]', function(c) return escapings[c] or ("\a%03d"):format(c:byte()) end):gsub("\a(%d%d%d%d)", "\\%1"):gsub("\a0?0?", "\\")..'"'
-      return '"'..str:gsub('[%c"\\]', function(c) return escapings[c] or "\a"..tostring(1000 + c:byte()):sub(-3) end):gsub("\a(%d%d%d%d)", "\\%1"):gsub("\a0?0?", "\\")..'"'
+      return '"'..str:gsub('[%c"\\]', function(c) return escapings[c] or ("\a%03d"):format(c:byte()) end):gsub("\a(%d%d%d%d)", "\\%1"):gsub("\a0?0?", "\\")..'"'
    end
 
    local is_keyword = {
@@ -344,7 +344,8 @@ local function make_arg(B, B_mode, is_really_an_instruction)
       assert(not is_really_an_instruction or B < 256, "Must be a register")
       return "@R"..B, B
    elseif B_mode == "K" then
-      return "@Const#"..(B-255), 255-B
+      B = B % 256 + 1
+      return "@Const#"..B, -B
    else
       assert(B_mode == "U")
       return B, B
@@ -464,22 +465,19 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       write_LE_block(s)
    end
 
-   local function write_int(value)
-      write_double_as_unsigned_int(convert_to_enbi.bytes_per_int, value)
-   end
-
    local function read_int()
-      -- always mirror to target bytecode
+      -- always mirrors to target bytecode
       local value = read_unsigned_int_as_double(bytes_per_int)
       if convert_to_enbi then
-         write_int(value)
+         write_double_as_unsigned_int(convert_to_enbi.bytes_per_int, value)
       end
       return math.floor(value)
    end
 
    local function read_string()
-      -- always mirror to target bytecode
-      -- returns "string" or nil
+      -- always mirrors to target bytecode
+      -- returns "string", file_offset (if string is defined)
+      -- returns nil                   (if string is not defined)
       --    [size_t size_including_term_zero]
       --    string, 00
       local old_style = Lua_version <= 0x52
@@ -627,7 +625,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       end
 
       function read_instruction()
-         -- always mirror to target bytecode
+         -- always mirrors to target bytecode
          local LE_block, file_offset, data_in_file = read_LE_block(4, true)
          bits_in_buffer, str_in_LE_order, str_pos = 0, LE_block, 0
          -- Instruction format:
@@ -726,10 +724,10 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
    end
 
-   assert(read_block(4, true) == "\27Lua", "Wrong bytecode signature.  Only vanilla Lua bytecodes are supported.")
+   assert(read_block(4, true) == "\27Lua", "Wrong bytecode signature.  Only PUC Lua bytecodes are supported.")
    -- [u8 version] Version number (0x52 for Lua 5.2, etc)
    Lua_version = read_byte(true)
-   assert(Lua_version >= 0x51 and Lua_version <= 0x53, "Lua version "..tohex(Lua_version, 2):gsub("^.", "%0.").." is not supported")
+   assert(Lua_version >= 0x51 and Lua_version <= 0x53, "Lua version "..("%02x"):format(Lua_version):gsub("^.", "%0.").." is not supported")
 
    -- [u8 impl] Implementation (0 = the bytecode is compatible with the "official" PUC-Rio implementation)
    assert(read_byte(true) == 0, "Bytecode is incompatible with PUC-Rio implementation")
@@ -769,7 +767,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       convert_to_enbi = parse_target_enbi(convert_to_enbi)
       if type(convert_to_enbi) == "string" then
-         print("Lua version of the source bytecode: "..tohex(Lua_version, 2):gsub("^.", "%0."))
+         print("Lua version of the source bytecode: "..("%02x"):format(Lua_version):gsub("^.", "%0."))
          error(convert_to_enbi)
       end
    end
@@ -883,14 +881,14 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       local block = read_block(bytes_per_lua_int)
       if not read_lua_int(block:reverse()):equals(0x5678) then
          is_LE = true
-         assert(read_lua_int(block):equals(0x5678), "Lua integer check failed")
+         assert(read_lua_int(block):equals(0x5678), "Lua integer check failed.\nPossible reason: Mixed-endian bytecodes are not supported.")
       end
       if convert_to_enbi then
          write_lua_int(convert_double_to_lua_int_wo_mt(0x5678))
       end
 
       -- float number check value
-      assert(read_lua_float() == 370.5, "Wrong FP number format")
+      assert(read_lua_float() == 370.5, "Lua FP number check failed.\nPossible reasons:\n1. Only IEEE-754 floating point numbers are supported.\n2. Mixed-endian bytecodes are not supported.")
       if convert_to_enbi then
          write_lua_float(370.5)
       end
@@ -901,6 +899,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       local A, B, C, opcode, name = next_instr.A, next_instr.B, next_instr.C, next_instr.opcode, next_instr.name
       local Ax = (B * 512 + C) * 256 + A
       if Lua_version == 0x51 then
+         -- extra arg in Lua 5.1 is used only for SETLIST instruction, and I hope a table size would be < 1e11
+         assert(Ax > 7 and Ax < 2^25)  -- hence, we can restrict extra arg value to be a positive int32, because 1e11/50 < 2^31
          Ax = Ax * 64 + opcode
       else
          assert(name == "EXTRAARG")
@@ -908,8 +908,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       return Ax
    end
 
-   local function parse_proto(is_root_proto)
-      local all_upvalues, upv_qty, source, debug_info = {}  -- debug_info is a string: either "stripped" or "included"
+   local function parse_proto(is_root_proto, parent_upv_qty)
+      local max_used_parent_upvalue_index, all_upvalues, upv_qty, source, debug_info = 0, {}  -- debug_info is a string: either "stripped" or "included"
 
       if Lua_version >= 0x53 and is_root_proto then
          upv_qty = read_byte(true)
@@ -946,6 +946,10 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       -- [u8 varargflags] -- vararg flag
       local is_vararg, has_local_arg, local_arg_contains_table
       if Lua_version == 0x51 then
+         -- 5.1 is_vararg flag (bitfield)
+         --   1=VARARG_HASARG       -- function has additional local variable "arg" after all other arguments, not counted in "parameters_qty"
+         --   2=VARARG_ISVARARG     -- function is vararg (declared as having "..." in its parameter list)
+         --   4=VARARG_NEEDSARG     -- local variable "arg" is initialized with an array of arguments with field "n" (this flag is set for every vararg function not using "..." in its body)
          local n = read_byte(true)
          assert(n < 8, "Wrong vararg flags")
          if src_line_from == 0 then  -- for main chunk
@@ -955,6 +959,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          has_local_arg = n % 2 > 0
          local_arg_contains_table = n > 3
       else
+         -- 5.2+  is_vararg = 0/1
          is_vararg = read_boolean(true)
          if src_line_from == 0 then  -- for main chunk
             assert(is_vararg)
@@ -973,15 +978,14 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          -- [instsize instruction]
          local opcode, A, B, C, file_offset, data_in_file = read_instruction()
          local instr_name = instr_names[opcode]
-         --local location_in_file = ("+%04X: %02X %02X %02X %02X"):format(file_offset, data_in_file:byte(1, 4))
-         local location_in_file = "+"..tohex(file_offset, 4)..": "..tohex(data_in_file:byte(), 2).." "..tohex(data_in_file:byte(2), 2).." "..tohex(data_in_file:byte(3), 2).." "..tohex(data_in_file:byte(4), 2)
+         local location_in_file = ("+%04X: %02X %02X %02X %02X"):format(file_offset, data_in_file:byte(1, 4))
          all_instructions[j] = {opcode = opcode, A = A, B = B, C = C, name = instr_name, location_in_file = location_in_file}
       end
 
-      -- Determine which instructions are reachable
-      all_instructions[1].is_reachable = true
+      -- Determine unreachable instructions
       do
          local fresh_pc_list = {1}
+         all_instructions[1].is_reachable = true
          repeat
             local new_fresh_pc_list = {}
             for _, pc in ipairs(fresh_pc_list) do
@@ -991,8 +995,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                   local m = instr_modes[name][1]
                   deltas = {}
                   if m:match"sBx$" then
-                     local sBx = instr.B * 512 + instr.C - 131071
-                     table.insert(deltas, sBx)  -- pc+1+sBx
+                     -- if a Lua 5.1-5.3 VM instruction has parameter sBx then it can jump +sBx
+                     table.insert(deltas, instr.B * 512 + instr.C - 131071)  -- pc+1+sBx
                   end
                   m = m:sub(1, 1)
                   if m == "X" then
@@ -1026,23 +1030,48 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          until #fresh_pc_list == 0
       end
 
+      -- Determine instructions reading/writing 'top'
+      do
+         local readers = {CALL = true, TAILCALL = true, RETURN = true, SETLIST = true}
+         for pc = 1, instr_qty do
+            local instr = all_instructions[pc]
+            if instr.is_reachable then
+               local name, B, C = instr.name, instr.B, instr.C
+               if readers[name] and B == 0 then
+                  instr.reads_top = true
+               end
+               if
+                  name == "CALL" and C == 0
+                  or name == "VARARG" and B == 0
+               then
+                  instr.writes_top = true
+               end
+            end
+         end
+      end
+
       -- [int nconsts]
       local const_qty = read_int()
       local all_consts = {}  -- [1..n] = {type="nil/boolean/string/float/integer", value=, value_as_text=, location_in_file=}
       for j = 1, const_qty do
          -- [u8 type]
          local const_type_id = read_byte(true)
+         local base_type_id = const_type_id % 16
+         local subtype_id = (const_type_id - base_type_id) / 16
+         if base_type_id == 3 or base_type_id == 4 then
+            assert(subtype_id == 0 or Lua_version >= 0x53 and subtype_id == 1, "Unknown constant type = "..const_type_id)
+         end
          local const_type, const_value, const_value_as_text, file_offset, data_in_file
-         if const_type_id == 4 or const_type_id == 4+16 then
+         if base_type_id == 4 then
             -- type 4:  string
             const_type = "string"
             const_value, file_offset = assert(read_string())
             data_in_file = const_value
             assert(const_value, "String is absent")
             const_value_as_text = serialize_string_value(const_value)
-         elseif const_type_id == 3 or const_type_id == 3+16 then
+         elseif base_type_id == 3 then
             -- type 3:  number
-            if const_type_id == 3 and bytes_per_lua_float then
+            if subtype_id == 0 and bytes_per_lua_float then
                const_type = "float"
                const_value, file_offset, data_in_file = read_lua_float()
                local predicted_float8
@@ -1082,13 +1111,12 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          else
             error("Unknown constant type = "..const_type_id)
          end
-         --local location_in_file = ("+%04X:Size=%X:"):format(file_offset, #data_in_file)
-         local location_in_file = "+"..tohex(file_offset, 4)..":Size="..tohex(#data_in_file)..":"
-         for j = 1, math.min(8, #data_in_file) do
-            location_in_file = location_in_file.." "..tohex(data_in_file:byte(j), 2)
+         local location_in_file = ("+%04X:Size=%X:"):format(file_offset, #data_in_file)
+         for j = 1, math.min(9, #data_in_file) do
+            location_in_file = location_in_file..(" %02X"):format(data_in_file:byte(j))
          end
-         local target_length = #"+FFFF:Size=8: 01 02 03 04 05 06 07 08"
-         if #data_in_file > 8 or #location_in_file > target_length then
+         local target_length = #"+FFFF:Size=9: 01 02 03 04 05 06 07 08 09"
+         if #data_in_file > 9 or #location_in_file > target_length then
             location_in_file = location_in_file:sub(1, target_length - 3).."..."
          end
          location_in_file = location_in_file..(" "):rep(target_length - #location_in_file)
@@ -1096,6 +1124,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       end
 
       local function parse_upvalues(qty)
+         -- this function is invoked only for 5.2+ bytecodes
          -- [int nupvals]
          upv_qty = read_int()
          assert(upv_qty == (qty or upv_qty))
@@ -1104,7 +1133,15 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             local in_locals = read_boolean(true)
             -- [u8 register] -- idx (either idx of register or idx of upvalue)
             local index = read_byte(true)
-            all_upvalues[j] = {in_locals = in_locals, index = in_locals and index or index + 1}    -- [1..n] = {in_locals=true/false, index=, var_name=}
+            if not in_locals then
+               index = index + 1
+               if parent_upv_qty then
+                  assert(index <= parent_upv_qty, "Upvalue index is out of range")
+               else
+                  max_used_parent_upvalue_index = math.max(max_used_parent_upvalue_index, index)
+               end
+            end
+            all_upvalues[j] = {in_locals = in_locals, index = index}    -- [1..n] = {in_locals=true/false, index=, var_name=}
          end
       end
 
@@ -1115,15 +1152,18 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       -- [int nfunctions]
       local protos_qty = read_int()
       local all_protos = {}
+      local max_upvalue_index_used_52 = 0
       for j = 1, protos_qty do
-         local proto, debug_info_in_proto = parse_proto()
+         local proto, debug_info_in_proto, max_upvalue_index_used_52_in_proto = parse_proto(false, upv_qty)
          all_protos[j] = proto
          debug_info = debug_info or debug_info_in_proto
          assert(debug_info == debug_info_in_proto)
+         max_upvalue_index_used_52 = math.max(max_upvalue_index_used_52, max_upvalue_index_used_52_in_proto)
       end
 
       if Lua_version == 0x52 then
          parse_upvalues()
+         assert(max_upvalue_index_used_52 <= upv_qty, "Upvalue index is out of range")
          -- [string source] | debug info
          source = read_string()
          local new_debug_info
@@ -1266,12 +1306,18 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             instr_as_luac = name:gsub("51$", "").." "..table.concat(params_luac, " ")
             if is_reachable then
                if is_really_an_instruction then
+                  if instr.reads_top then
+                     assert(all_instructions[pc - 1].writes_top)
+                  end
+                  if instr.writes_top then
+                     assert(all_instructions[pc + 1].reads_top)
+                  end
                   if group == "1" then  -- binary operators
                      assert(mode == "iABC")
                      if name == "GETTABUP" then
                         params[2] = B + 1
                      end
-                     instr_as_text = "@@R"..params[1].." = "..data_1..params[2]..data_2..params[3]..data_3
+                     instr_as_text = "@@R"..A.." = "..data_1..params[2]..data_2..params[3]..data_3
                   elseif group == "2" then   -- unary operators
                      if name == "LOADKX" then
                         local extra = get_extra_arg(all_instructions[pc + 1])
@@ -1290,7 +1336,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                            end
                         end
                      end
-                     instr_as_text = "@@R"..params[1].." = "..data_1..params[2]..data_2
+                     instr_as_text = "@@R"..A.." = "..data_1..params[2]..data_2
                   elseif group == "3" or group == "4" then
                      if name == "SETTABUP" then
                         params[1] = A + 1
@@ -1499,6 +1545,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      upv_info.in_locals = true
                      upv_info.index = B
                   else
+                     assert(B < upv_qty, "Upvalue index is out of range")
                      upv_info.index = B + 1
                   end
                end
@@ -1515,34 +1562,36 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             data_items_ahead = data_items_ahead - 1
             instr_as_text = "(data for previous instruction)"
             if data_descr == "extra_arg_51" then
-               instr_as_luac = ("%.0f"):format(Ax * 64.0 + instr.opcode)
+               instr_as_luac = ("%.f"):format(Ax * 64.0 + instr.opcode)
             end
          end
          instr.instr_as_luac = instr_as_luac
          instr.instr_as_text = instr_as_text
       end
 
-      return {   -- proto object
-         source = source,
-         src_line_from = src_line_from,
-         src_line_to = src_line_to,
-         parameters_qty = parameters_qty,
-         is_vararg = is_vararg,
-         has_local_arg = has_local_arg,
-         local_arg_contains_table = local_arg_contains_table,
-         registers_needed = registers_needed,
-         const_qty = const_qty,
-         all_consts = all_consts,
-         upv_qty = upv_qty,
-         all_upvalues = all_upvalues,
-         locals_qty = locals_qty,
-         all_locals = all_locals,
-         instr_qty = instr_qty,
-         all_instructions = all_instructions,
-         protos_qty = protos_qty,
-         all_protos = all_protos,
-      },
-      debug_info
+      return
+         {   -- proto object
+            source = source,
+            src_line_from = src_line_from,
+            src_line_to = src_line_to,
+            parameters_qty = parameters_qty,            -- The local variable "arg" (exists when VARARG_NEEDSARG=1) is not counted in parameters_qty
+            is_vararg = is_vararg,
+            has_local_arg = has_local_arg,
+            local_arg_contains_table = local_arg_contains_table,
+            registers_needed = registers_needed,
+            const_qty = const_qty,
+            all_consts = all_consts,
+            upv_qty = upv_qty,
+            all_upvalues = all_upvalues,
+            locals_qty = locals_qty,
+            all_locals = all_locals,
+            instr_qty = instr_qty,
+            all_instructions = all_instructions,
+            protos_qty = protos_qty,
+            all_protos = all_protos,
+         },
+         debug_info,
+         max_used_parent_upvalue_index
    end
 
    local root_proto, debug_info = parse_proto(true)
@@ -1705,7 +1754,7 @@ local function get_bytecode_listing(bytecode_object)
       table.insert(printed_lines, line or "")
    end
 
-   Print("Lua version: "..tohex(bytecode_object.Lua_version, 2):gsub("^.", "%0."))
+   Print("Lua version: "..("%02x"):format(bytecode_object.Lua_version):gsub("^.", "%0."))
    local enbi = bytecode_object.enbi
    local enbi_as_string =
       (enbi.is_LE and "L" or "B")
