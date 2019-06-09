@@ -589,7 +589,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                while value < 2^exp do
                   exp = exp - 1
                end
-               assert(exp <= base_exp and exp >= low_exp - significand_bits)
+               assert(value == 0.0 or exp <= base_exp and exp >= low_exp - significand_bits)
                if exp < low_exp then
                   exp, high_bit = low_exp, 0.0
                end
