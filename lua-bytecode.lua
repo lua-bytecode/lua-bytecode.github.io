@@ -3,7 +3,7 @@
 -- PUC Lua 5.1, 5.2, 5.3 bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-06-09
+-- Version: 2019-06-25
 
 
 -- must have "double" Lua numbers
@@ -12,273 +12,196 @@ do
    assert(x - (x-1) == 1 and (x+1) - x ~= 1, "Floating point numbers must be 'double'")
 end
 
--- determine decimal point
-local dot = assert(tostring(5.5):match"5(%p)5", "Failed to determine decimal point symbol in the current locale")
-do
-   local s = "-5"..dot.."5"
-   assert(tostring(-5.5) == s and tonumber(s) == -5.5, "Failed to determine decimal point symbol in the current locale")
-end
-
-local function round_float8_to_float4(x)
-   if not x or x == 0.0 or x ~= x then
+local function round_float64_to_float32(x)
+   if x == 0.0 or x ~= x then
       return x
    end
    local sign = 1.0
    if x < 0.0 then
-      sign = -1.0
-      x = -x
+      sign, x = -sign, -x
    end
-   local min_pos_float4 = 2^-149
-   local max_pos_float4 = 2^128 - 2^104
-   if x > 2.0 * max_pos_float4 then
-      return sign / 0.0
-   elseif x < 0.5 * min_pos_float4 then
+   -- float32 limits:
+   --    min subnormal positive = 2^-149
+   --    max finite positive    = 2^128 - 2^104
+   if x > 0.5 * 2^-149 and x < 2^128 then
+      local e = 2.0^math.floor(math.log(x)/math.log(2) + 0.5)
+      e = (x < e and e * 0.5 or e) * 2^-23
+      e = e < 2^-149 and 2^-149 or e
+      x = x + 0.5 * e
+      local r = x % e
+      x = x - (r == 0.0 and x % (e + e) or r)
+   end
+   if x < 2^-149 then
       return sign * 0.0
-   end
-   local e = 1.0
-   if x >= e then
-      while x >= e * 2.0 do
-         e = e * 2.0
-      end
-   else
-      repeat
-         e = e * 0.5
-      until x >= e
-   end
-   -- e <= x < 2*e
-   local m = e * 2^-23
-   x = x + 0.5 * m
-   local r = x % m
-   if r == 0.0 then
-      r = x % (2.0 * m)
-   end
-   x = x - r
-   if x > max_pos_float4 then
+   elseif x > 2^128 - 2^104 then
       return sign / 0.0
-   elseif x < min_pos_float4 then
-      return sign * 0.0
    else
       return sign * x
    end
 end
 
-local serialize_float_value, serialize_float_key
+local serialize_float_value
 do
-   local function increase_fixed_width_int(str)
-      assert(str:match"^%d*$")
-      for pos = #str, 1, -1 do
-         local digit = str:sub(pos, pos)
-         digit = digit == "9" and "0" or string.char(digit:byte() + 1)
-         str = str:sub(1, pos - 1)..digit..str:sub(pos + 1)
-         if digit ~= "0" then
-            return str
-         end
-      end
-      return str, true
+
+   local function get_shortest_string(str1, str2)
+      -- returns the shortest of the two strings (first one on tie)
+      return str1 and (str2 and #str2 < #str1 and str2 or str1) or str2
    end
 
-   local function string_to_float(str, bytes_per_float)
-      str = str:gsub("^-?%d+$", "%0"..dot.."0")
-      local x = tonumber(str)
-      if bytes_per_float == 4 then
-         return round_float8_to_float4(x)
-      else
-         return x
+   local function sign_and_three_digits(n, zero)
+      -- 42 -> "e+042"
+      if n == 0 then
+         return zero
+      end
+      local sign = "+"
+      if n < 0 then
+         sign, n = "-", -n
+      end
+      n = tostring(n)
+      return "e"..sign..("0"):rep(3 - #n)..n
+   end
+
+   local function fraction_to_string(N, D, k, min_degree_float, max_degree_float)
+      if (D ~= 1 or k ~= 0) and k >= min_degree_float and k <= max_degree_float and N < 2^20 and D < 2^20 then
+         local div, denom = N ~= D and k < 0 and k >= -max_degree_float, ("%.f"):format(D)
+         return
+            N == 1 and D ~= 1 and k ~= 0 and "2^"..k.." / "..denom
+            or (N == D and "" or ("%.f"):format(N)..(D == 1 and "" or "/"..denom)..(k == 0 and "" or " "..(div and "/" or "*").." "))
+               ..(k == 0 and "" or "2^"..(div and -k or k))
       end
    end
 
-   local function float_to_compact_str(num, bytes_per_float)
-      -- "compact" means shortest string representation which is a correct Lua expression, without ".0" suffix for integers
-      if bytes_per_float == 4 then
-         num = round_float8_to_float4(num)
-      end
-      if num == 0.0 then
-         return 1.0/num < 0.0 and "-0" or "0"
-      elseif num ~= num then
+   function serialize_float_value(the_number, bytes_per_float)
+      -- bytes_per_float: 4           = "the_number" is 64-bit float, but it contains a value stored somewhere as 32-bit float
+      --                  8 (default) = "the_number" is 64-bit float, and it was loaded from 64-bit float value
+      if the_number ~= the_number then
+         -- nan
          return "0/0"
       end
-      local sign, x = "", num
-      if x < 0.0 then
-         sign = "-"
-         x = -x
+      local float_number = the_number * 1.0
+      assert(float_number == the_number)
+      local is_float32 = bytes_per_float == 4
+      if is_float32 then
+         assert(float_number == round_float64_to_float32(float_number))
       end
-      if x == 1.0 then
-         return sign.."1"
-      elseif x == 1/0 then
-         return sign.."1/0"
+      if float_number == 0 then
+         -- zero
+         return 1/float_number < 0 and "-0.0" or "0.0"
       end
-      local result, predicted_float8 = ("%.17g"):format(num)
-      if bytes_per_float == 4 then
-         local s = result:gsub("^-?%d+$", "%0"..dot.."0")
-         predicted_float8 = tonumber(s)
+      local sign, positive_float, shortest = "", float_number, "1/0"
+      if positive_float < 0 then
+         sign, positive_float = "-", -positive_float
       end
-      do
-         local prefix, inner, suffix = result:match("^(%-?)(%d*%"..dot.."%d*)(.*)$")
-         if prefix then
-            if suffix == "" then
-               local e = assert(("%.17g"):format(1e33):match"[eE]")
-               suffix = e.."0"
+      if positive_float ~= 1/0 then
+         -- convert the number to string and split the string into mantissa and exponent
+         local mant_int, mant_frac, exponent = ("%.17e"):format(positive_float):match"^(%d)%D+(%d+)e([-+]%d+)$"
+         local mantissa, trailing_zeroes = (mant_int..mant_frac):match"^([^0].-)(0*)$"
+         exponent = assert(tonumber(exponent)) + #trailing_zeroes - #mant_frac
+         local test_value = assert(tonumber(mantissa.."e"..exponent))
+         assert((is_float32 and round_float64_to_float32(test_value) or test_value) == positive_float)
+         -- remove last digits while float value is not affected (example: 0.10000000000000001 -> 0.1)
+         repeat
+            local truncated_mantissa, incr = mantissa:match"^(.*)(.)$"
+            incr = tonumber(incr) > 4
+            for _ = 1, 2 do
+               local new_exponent, new_mantissa = exponent + 1
+               if incr then
+                  -- remove the last digit and round up
+                  local head, digit, tail = ("0"..truncated_mantissa):match"^(.-)(.)(9*)$"
+                  new_mantissa, incr = head:match"^0?(.*)$"..string.char(digit:byte() + 1)
+                  new_exponent = new_exponent + #tail
+               else
+                  -- remove the last digit and round down
+                  new_mantissa, incr = truncated_mantissa:match"^(.-)(0*)$"
+                  new_exponent = new_exponent + #incr
+               end
+               test_value = tonumber(new_mantissa.."e"..new_exponent)
+               if test_value and (is_float32 and round_float64_to_float32(test_value) or test_value) == positive_float then
+                  -- value was preserved after removing the last digit of mantissa
+                  mantissa, exponent, truncated_mantissa = new_mantissa, new_exponent
+                  break
+               end
             end
-            assert(suffix:match"^([eE])([-+]?%d+)$")
+         until truncated_mantissa
+         local good_fixed = exponent >= -9 and #mantissa <= 9 - exponent and #mantissa <= (is_float32 and 5 or 9)
+         shortest =
+            (good_fixed or exponent < 0 and exponent >= -6 - #mantissa)
+            and (
+               exponent >= 0 and mantissa..("0"):rep(exponent)..".0"
+               or exponent > -#mantissa and mantissa:sub(1, exponent-1).."."..mantissa:sub(exponent)
+               or "0."..("0"):rep(-exponent - #mantissa)..mantissa
+            )
+         if not good_fixed then
+            shortest = get_shortest_string(
+               -- int53 (int24 for float32)
+               positive_float <= (is_float32 and 2^24 or 2^53) and math.floor(positive_float) == positive_float and ("%.f.0"):format(positive_float),
+               get_shortest_string(
+                  -- fixed point with fractional part
+                  shortest,
+                  -- scienific notation
+                  #mantissa == 1 and mantissa..sign_and_three_digits(exponent + #mantissa - 1, ".0")
+                  or mantissa:sub(1, 1).."."..mantissa:sub(2)..sign_and_three_digits(exponent + #mantissa - 1, "")
+               )
+            )
+            -- search for a fraction (example: 0.33333333333333331 -> 1/3)
+            local k = math.floor(math.log(positive_float)/math.log(2) + 0.5)
+            local e = 2^k
+            if positive_float < e then
+               k = k - 1
+               e = 2^k
+            end
+            -- e = 2^k;   e <= positive_float < 2*e
+            local x, pn, n, pd, d, N, D = positive_float / e - 1.0, 0.0, 1.0, 1.0, 0.0
+            local two_wl = is_float32 and 2^9 or 2^20
             repeat
-               local finished, incr = true, inner:match"[0-4]$"
-               for j = 1, 2 do
-                  incr = not incr
-                  if inner:match"%d$" then
-                     local new_inner, new_suffix = inner:sub(1, -2), suffix
-                     if incr then
-                        local int, frac, carry = assert(new_inner:match("^(%d*)%"..dot.."(%d*)$"))
-                        frac, carry = increase_fixed_width_int(frac)
-                        if carry then
-                           int = increase_fixed_width_int("0"..int):gsub("^0+", "")
-                           if int:match"0$" then
-                              local e, exp = assert(new_suffix:match"^([eE])([-+]?%d+)$")
-                              int, frac = int:sub(1, -2), "0"..frac
-                              new_suffix = e..tostring(tonumber(exp) + 1)
-                           end
-                        end
-                        new_inner = int..dot..frac
-                     end
-                     if string_to_float(prefix..new_inner..new_suffix, bytes_per_float) == num then
-                        inner, suffix, finished = new_inner, new_suffix
-                        break
-                     end
+               local Q, q = x + 0.5, x - x % 1.0
+               Q = Q - Q % 1.0
+               pd, d, D = d, q*d + pd, Q*d + pd
+               pn, n, N = n, q*n + pn, Q*n + pn + D
+               test_value = N/D * e
+               if N >= two_wl then
+                  break
+               elseif (is_float32 and round_float64_to_float32(test_value) or test_value) == positive_float then
+                  -- Fraction found:  N/D * 2^k   where N,D < 2^20 (2^9 for float32)
+                  local max_degree_float = is_float32 and 127 or 1023
+                  local min_degree_float = is_float32 and -149 or -1074
+                  while k > 0 and D % 2.0 == 0 do
+                     k, D = k - 1, D / 2.0
                   end
-               end
-            until finished
-            result = prefix..inner:gsub("%"..dot.."$", "")..suffix
-            if bytes_per_float == 4 then
-               predicted_float8 = tonumber(result)  -- result is in exponential form here
-            end
-         end
-         local mant, e, exp = result:match"^(.+)([eE])([-+]?%d+)$"
-         if mant then
-            -- convert XXe+YY to XXeYY
-            exp = assert(tonumber(exp))
-            result = exp == 0 and mant or mant..e..exp
-         end
-         assert(string_to_float(result, bytes_per_float) == num)
-      end
-      local e, k, found, N, D = 1.0, 0
-      if x >= e then
-         while x >= e * 2.0 do
-            e = e * 2.0
-            k = k + 1
-         end
-      else
-         repeat
-            e = e * 0.5
-            k = k - 1
-         until x >= e
-      end
-      -- e <= x < 2*e, e=2^k
-      x = x / e
-      local sane_width = bytes_per_float == 4 and 9 or 20
-      local two_sw = 2^sane_width
-      if x % (2.0 / two_sw) == 0.0 then
-         k, found, N, D = k + 1 - sane_width, true, 0.5 * x * two_sw, 1.0
-      else
-         e, x = sign == "-" and -e or e, x - 1.0
-         local pn, n, pd, d = 0.0, 1.0, 1.0, 0.0
-         repeat
-            local Q, q = x + 0.5, x - x % 1.0
-            Q = Q - Q % 1.0
-            pd, d, D = d, q*d + pd, Q*d + pd
-            pn, n, N = n, q*n + pn, Q*n + pn + D
-            local out_of_range = N > two_sw
-            local appr = N/D * e
-            if bytes_per_float == 4 then
-               appr = round_float8_to_float4(appr)
-            end
-            found = not out_of_range and appr == num
-            x = 1.0 / (x - q)
-         until found or out_of_range or x ~= x or x > two_sw
-      end
-      if found then
-         if k > 0 then
-            while k > 0 and D % 2.0 == 0.0 do
-               k, D = k - 1, D * 0.5
-            end
-            if k > 0 then
-               if 2^k * N <= 10^6 then
-                  k, N = 0, N * 2^k
-               else
-                  local max_degree_float = bytes_per_float == 4 and 127 or 1023
-                  while k < max_degree_float and N % 2.0 == 0.0 do
-                     k, N = k + 1, N * 0.5
+                  while k < 0 and N % 2.0 == 0 do
+                     k, N = k + 1, N / 2.0
                   end
-               end
-            end
-         else
-            while k < 0 and N % 2.0 == 0 do
-               k, N = k + 1, N * 0.5
-            end
-            if k < 0 then
-               if 2^-k * D <= 10^6 then
-                  k, D = 0, D * 2^-k
-               else
-                  local min_degree_float = bytes_per_float == 4 and -149 or -1074
-                  while k > min_degree_float and D % 2.0 == 0.0 do
-                     k, D = k - 1, D * 0.5
+                  local frac = fraction_to_string(k > 0 and N * 2^k or N, k < 0 and D * 2^-k or D, 0, 0, 0)
+                  if not frac then
+                     local dk = k > 0 and 1 or -1
+                     local fN = (3 + dk) / 2
+                     local fD = 2 / fN
+                     repeat
+                        frac = fraction_to_string(N, D, k, min_degree_float, max_degree_float) or frac
+                        k, N, D = k + dk, N / fN, D / fD
+                     until N % fN + D % fD ~= 0
                   end
+                  shortest = get_shortest_string(shortest, frac)
+                  break
                end
-            end
-         end
-         local factor_exists = N ~= 1.0 or D ~= 1.0
-         local power_exists = k ~= 0
-         local result2 = sign
-            ..(factor_exists and math.floor(N)..(D == 1.0 and "" or "/"..math.floor(D)) or "")
-            ..(factor_exists and power_exists and " * " or "")
-            ..(power_exists and "2^"..tostring(k) or "")
-         if #result2 < #result then
-            result = result2
-            if bytes_per_float == 4 then
-               predicted_float8 = (sign == "-" and -1.0 or 1.0) * (N / D) * 2^k
-            end
+               x = 1.0 / (x - q)
+            until x >= two_wl or x ~= x
          end
       end
-      return result, predicted_float8
-   end
-
-   function serialize_float_value(x, bytes_per_float)
-      -- appending ".0" to integer literals
-      local str, predicted_float8 = float_to_compact_str(x, bytes_per_float)
-      return str:gsub("^-?%d+$", "%0"..dot.."0"), predicted_float8
-   end
-
-   function serialize_float_key(x, bytes_per_float)
-      -- [x]
-      -- when float is used as a table key, there is no difference between "t[42]" and "t[42.0]", between "t[-0.0]", "t[0.0]" and "t[0]"
-      -- decimal integer literals are allowed (instead of floats) when they are table keys
-      local str, predicted_float8 = float_to_compact_str(x, bytes_per_float)
-      return "["..(str == "-0" and "0" or str).."]", predicted_float8
+      shortest = sign..shortest
+      local float64_value = assert((loadstring or load)("return "..shortest))()
+      assert((is_float32 and round_float64_to_float32(float64_value) or float64_value) == float_number)
+      return shortest, is_float32 and float64_value
    end
 
 end
 
-local serialize_string_value, serialize_string_key, is_correct_identifier
+local serialize_string_value
 do
    local escapings={["\a"]="\\a", ["\b"]="\\b", ["\t"]="\\t", ["\n"]="\\n", ["\v"]="\\v", ["\f"]="\\f", ["\r"]="\\r", ['"']='\\"', ["\\"]="\\\\"}
 
    function serialize_string_value(str)
       return '"'..str:gsub('[%c"\\]', function(c) return escapings[c] or ("\a%03d"):format(c:byte()) end):gsub("\a(%d%d%d%d)", "\\%1"):gsub("\a0?0?", "\\")..'"'
-   end
-
-   local is_keyword = {
-      ["and"]=0, ["break"]=0, ["do"]=0, ["else"]=0, ["elseif"]=0, ["end"]=0, ["false"]=0, ["for"]=0, ["function"]=0, ["goto"]=0, ["if"]=0,
-      ["in"]=0, ["local"]=0, ["nil"]=0, ["not"]=0, ["or"]=0, ["repeat"]=0, ["return"]=0, ["then"]=0, ["true"]=0, ["until"]=0, ["while"]=0
-   }
-
-   function is_correct_identifier(str, Lua_version)
-      return
-         str:find"^[A-Za-z_][A-Za-z0-9_]*$" and not is_keyword[str]
-         or Lua_version == 0x51 and str == "goto"
-   end
-
-   function serialize_string_key(key)
-      -- ["key"] or .key ?
-      assert(type(key) == "string")
-      return is_correct_identifier(key) and "."..key or "["..serialize_string_value(key).."]"
    end
 
 end
@@ -571,7 +494,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          buffer, bits_in_buffer, str_in_LE_order = 0.0, 0, ""
          local exp_bits, significand_bits = 11, 52
          if convert_to_enbi.bytes_per_lua_float == 4 then
-            value, exp_bits, significand_bits = round_float8_to_float4(value), 8, 23
+            value, exp_bits, significand_bits = round_float64_to_float32(value), 8, 23
          end
          local max_exp_field = 2^exp_bits - 1.0
          local sign_field, significand, exp_field = 1, 0.0, max_exp_field
@@ -589,7 +512,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                while value < 2^exp do
                   exp = exp - 1
                end
-               assert(value == 0.0 or exp <= base_exp and exp >= low_exp - significand_bits)
+               assert(value == 0 or exp <= base_exp and exp >= low_exp - significand_bits)
                if exp < low_exp then
                   exp, high_bit = low_exp, 0.0
                end
@@ -1533,7 +1456,10 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      for j = 1, locals_qty do
                         local loc = all_locals[j]
                         local loc_reg = loc.reg_no
-                        if loc_reg >= regs_from and loc_reg <= regs_to and assignment_pc < loc.start_pc and assignment_pc > loc.def_pc then
+                        if
+                           loc_reg >= regs_from and loc_reg <= regs_to and assignment_pc < loc.start_pc and assignment_pc > loc.def_pc
+                           and not (name == "LOADBOOL" and loc.def_pc == pc - 1 and pc > 1 and all_instructions[pc - 1].name == name)
+                        then
                            loc.def_pc = assignment_pc
                         end
                      end
