@@ -3,7 +3,7 @@
 -- PUC Lua 5.1, 5.2, 5.3 bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-06-25
+-- Version: 2019-07-01
 
 
 -- must have "double" Lua numbers
@@ -329,7 +329,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       return block, file_offset
    end
 
-   local Lua_version
+   local Lua_version, Lua_version_as_string
    local is_LE = false        -- true/false
    local bytes_per_int        -- 4/8
    local bytes_per_pointer    -- 4/8
@@ -388,28 +388,43 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       write_LE_block(s)
    end
 
-   local function read_int()
+   local function read_int(first_byte)
       -- always mirrors to target bytecode
-      local value = read_unsigned_int_as_double(bytes_per_int)
-      if convert_to_enbi then
-         write_double_as_unsigned_int(convert_to_enbi.bytes_per_int, value)
+      local value = 0
+      if first_byte or Lua_version > 0x53 then
+         local ctr = 5
+         repeat
+            assert(ctr > 0 and value < 2^24, "Integer overflow")
+            local b = first_byte or read_byte(true)
+            value, ctr, first_byte = value * 128 + b % 128, ctr - 1
+         until b > 127
+      else
+         value = read_unsigned_int_as_double(bytes_per_int)
+         if convert_to_enbi then
+            write_double_as_unsigned_int(convert_to_enbi.bytes_per_int, value)
+         end
+         value = math.floor(value)
       end
-      return math.floor(value)
+      return value
    end
 
    local function read_string()
       -- always mirrors to target bytecode
       -- returns "string", file_offset (if string is defined)
       -- returns nil                   (if string is not defined)
-      --    [size_t size_including_term_zero]
-      --    string, 00
-      local old_style = Lua_version <= 0x52
-      local len_with_term_zero = old_style and 0xFF or read_byte(true)
-      if len_with_term_zero == 0xFF then
-         len_with_term_zero = read_unsigned_int_as_double(bytes_per_pointer)
-         if convert_to_enbi then
-            write_double_as_unsigned_int(convert_to_enbi.bytes_per_pointer, len_with_term_zero)
+      local old_style, len_with_term_zero = Lua_version < 0x53
+      if Lua_version <= 0x53 then
+         len_with_term_zero = old_style and 0xFF or read_byte(true)
+         if len_with_term_zero == 0xFF then
+            -- [size_t size_including_term_zero]
+            -- string, 00
+            len_with_term_zero = read_unsigned_int_as_double(bytes_per_pointer)
+            if convert_to_enbi then
+               write_double_as_unsigned_int(convert_to_enbi.bytes_per_pointer, len_with_term_zero)
+            end
          end
+      else
+         len_with_term_zero = read_int()
       end
       if len_with_term_zero > 0 then
          local str, file_offset = read_block(len_with_term_zero - 1, true)
@@ -648,51 +663,49 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    end
 
    assert(read_block(4, true) == "\27Lua", "Wrong bytecode signature.  Only PUC Lua bytecodes are supported.")
-   -- [u8 version] Version number (0x52 for Lua 5.2, etc)
-   Lua_version = read_byte(true)
-   assert(Lua_version >= 0x51 and Lua_version <= 0x53, "Lua version "..("%02x"):format(Lua_version):gsub("^.", "%0.").." is not supported")
-
+   do
+      -- [u8 version] Version number (0x52 for Lua 5.2, etc)
+      Lua_version = read_byte(true)
+      assert(Lua_version ~= 0x54, "Lua versions 5.4.0 work/work2 (published prior to 5.4.0 alpha) are not supported")
+      local version_factor = 16
+      if not (Lua_version >= 0x10 and Lua_version <= 0x53) then
+         Lua_version = read_int(Lua_version)
+         assert(Lua_version >= 504 and Lua_version < 2048, "Invalid Lua version specified in bytecode header")  -- first byte should be less than 0x10, hence no collisions up to Lua 20.47
+         version_factor = 100
+      end
+      local major_version = math.floor(Lua_version / version_factor)
+      local minor_version = Lua_version % version_factor
+      Lua_version = major_version * 16 + minor_version
+      Lua_version_as_string = major_version.."."..minor_version
+      assert(minor_version < 16 and major_version < 16 and Lua_version >= 0x51 and Lua_version <= 0x53, "Lua version "..Lua_version_as_string.." is not supported")
+   end
    -- [u8 impl] Implementation (0 = the bytecode is compatible with the "official" PUC-Rio implementation)
    assert(read_byte(true) == 0, "Bytecode is incompatible with PUC-Rio implementation")
 
    if convert_to_enbi then
-
-      local function parse_target_enbi(enbi_as_string)
-         local e, c_int, c_ptr, lua_int, lua_float = enbi_as_string:upper():match"^([LB])([48])([48])([048])([048])$"
-         if not e then
-            return "\nERROR: Wrong target EnBi string: "..enbi_as_string.."\nEnBi must match this regex: ^[LB][48][48][048][048]$"
-         end
-         c_int     = tonumber(c_int)
-         c_ptr     = tonumber(c_ptr)
-         lua_int   = tonumber(lua_int)
-         lua_float = tonumber(lua_float)
+      local version_subset = math.max(Lua_version, 0x52)
+      local enbi_pattern = ({
+         [0x52] = "^([LB])([48])([48])([048])([048])$",
+         [0x53] = "^([LB])([48])([48])([48])([48])$",
+         [0x54] = "^([LB])([48])([48])$",
+      })[version_subset]
+      local e, c_int, c_ptr, lua_int, lua_float = convert_to_enbi:upper():match(enbi_pattern)
+      assert(e, "ERROR: Wrong target EnBi string: "..convert_to_enbi.."\nLua "..Lua_version_as_string.." bytecode's EnBi must match the following regex: "..enbi_pattern:gsub("[()]", ""))
+      lua_int, lua_float, c_int, c_ptr = tonumber(lua_int), tonumber(lua_float), tonumber(c_int), tonumber(c_ptr)
+      if version_subset == 0x52 then
          lua_int   = lua_int   ~= 0 and lua_int   or nil
          lua_float = lua_float ~= 0 and lua_float or nil
-         if lua_int and lua_float then
-            if Lua_version <= 0x52 then
-               return "\nERROR: Wrong target EnBi string: "..enbi_as_string.."\nThis Lua version could have either Lua integer or Lua float, but not both"
-            end
-         elseif lua_int or lua_float then
-            if Lua_version >= 0x53 then
-               return "\nERROR: Wrong target EnBi string: "..enbi_as_string.."\nThis Lua version must have both Lua integer and Lua float"
-            end
-         else
-            return "\nERROR: Wrong target EnBi string: "..enbi_as_string.."\nBoth Lua integer and Lua float are not specified"
-         end
-         return {
-            is_LE               = e == "L",
-            bytes_per_int       = c_int,
-            bytes_per_pointer   = c_ptr,
-            bytes_per_lua_int   = lua_int,
-            bytes_per_lua_float = lua_float
-         }
+         assert(not lua_int ~= not lua_float, "ERROR: Wrong target EnBi string: "..convert_to_enbi.."\nLua "..Lua_version_as_string.." bytecode's EnBi must contain exactly one zero")
+      elseif version_subset == 0x54 then
+         lua_int, lua_float, c_int, c_ptr = c_int, c_ptr
       end
-
-      convert_to_enbi = parse_target_enbi(convert_to_enbi)
-      if type(convert_to_enbi) == "string" then
-         print("Lua version of the source bytecode: "..("%02x"):format(Lua_version):gsub("^.", "%0."))
-         error(convert_to_enbi)
-      end
+      convert_to_enbi = {
+         is_LE               = e == "L",
+         bytes_per_int       = c_int,
+         bytes_per_pointer   = c_ptr,
+         bytes_per_lua_int   = lua_int,
+         bytes_per_lua_float = lua_float
+      }
    end
 
    local instr_names = {}  -- [opcode] = "instruction name"
@@ -729,18 +742,21 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    end
 
    local function read_sizes_of_int_ptr_instr_num()
-      -- [u8 intsize] Size of integers
-      bytes_per_int = read_byte()
-      assert(bytes_per_int == 4 or bytes_per_int == 8, "Wrong integer size: "..bytes_per_int)
-      if convert_to_enbi then
-         write_byte(convert_to_enbi.bytes_per_int)
-      end
 
-      -- [u8 size_t] Size of pointers
-      bytes_per_pointer = read_byte()
-      assert(bytes_per_pointer == 4 or bytes_per_pointer == 8, "Wrong pointer size")
-      if convert_to_enbi then
-         write_byte(convert_to_enbi.bytes_per_pointer)
+      if Lua_version <= 0x53 then
+         -- [u8 intsize] Size of integers
+         bytes_per_int = read_byte()
+         assert(bytes_per_int == 4 or bytes_per_int == 8, "Wrong integer size: "..bytes_per_int)
+         if convert_to_enbi then
+            write_byte(convert_to_enbi.bytes_per_int)
+         end
+
+         -- [u8 size_t] Size of pointers
+         bytes_per_pointer = read_byte()
+         assert(bytes_per_pointer == 4 or bytes_per_pointer == 8, "Wrong pointer size")
+         if convert_to_enbi then
+            write_byte(convert_to_enbi.bytes_per_pointer)
+         end
       end
 
       -- [u8 instsize] Size of instructions (always 4)
@@ -982,6 +998,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          local base_type_id = const_type_id % 16
          local subtype_id = (const_type_id - base_type_id) / 16
          if base_type_id == 3 or base_type_id == 4 then
+            subtype_id = subtype_id - (Lua_version >= 0x54 and 1 or 0)
             assert(subtype_id == 0 or Lua_version >= 0x53 and subtype_id == 1, "Unknown constant type = "..const_type_id)
          end
          local const_type, const_value, const_value_as_text, file_offset, data_in_file
@@ -1525,6 +1542,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    return convert_to_enbi and table.concat(target_bytecode) or {
       -- bytecode object
       Lua_version = Lua_version,
+      Lua_version_as_string = Lua_version_as_string,
       enbi = {
          is_LE = is_LE,
          bytes_per_int = bytes_per_int,
@@ -1680,18 +1698,19 @@ local function get_bytecode_listing(bytecode_object)
       table.insert(printed_lines, line or "")
    end
 
-   Print("Lua version: "..("%02x"):format(bytecode_object.Lua_version):gsub("^.", "%0."))
+   Print("Lua version: "..bytecode_object.Lua_version_as_string)
    local enbi = bytecode_object.enbi
    local enbi_as_string =
       (enbi.is_LE and "L" or "B")
-      ..enbi.bytes_per_int
-      ..enbi.bytes_per_pointer
+      ..(bytecode_object.Lua_version <= 0x53 and enbi.bytes_per_int..enbi.bytes_per_pointer or "")
       ..(enbi.bytes_per_lua_int or 0)
       ..(enbi.bytes_per_lua_float or 0)
    Print('EnBi = "'..enbi_as_string..'" (endianness and bitness of this bytecode)')
    Print("  Endianness          = "..(enbi.is_LE and "L (little-endian)" or "B (big-endian)"))
-   Print("  Size of C int       = "..enbi.bytes_per_int)
-   Print("  Size of C pointer   = "..enbi.bytes_per_pointer)
+   if bytecode_object.Lua_version <= 0x53 then
+      Print("  Size of C int       = "..enbi.bytes_per_int)
+      Print("  Size of C pointer   = "..enbi.bytes_per_pointer)
+   end
    Print("  Size of Lua integer = "..(enbi.bytes_per_lua_int or 0))
    Print("  Size of Lua float   = "..(enbi.bytes_per_lua_float or 0))
    Print("Debug info: "..(bytecode_object.debug_info_is_stripped and "stripped" or "included"))

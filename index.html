@@ -96,6 +96,10 @@
                L4884 = " (x64 float32)",
                L4444 = " (x86 LUA_32BITS)",
                L4844 = " (x64 LUA_32BITS)",
+               L88 = " (default)",
+               L48 = " (int32)",
+               L84 = " (float32)",
+               L44 = " (LUA_32BITS)",
             }
             local filename, listing, version, current_enbi, bytecode_loader
 
@@ -129,8 +133,8 @@
                if version then
                   local enbi_arr = {}
                   for _, e in ipairs{"L", "B"} do
-                     for p = 4, 8, 4 do
-                        local s = e.."4"..tostring(p)
+                     for p = 4, version <= 0x53 and 8 or 4, 4 do
+                        local s = version <= 0x53 and e.."4"..tostring(p) or e
                         if version < 0x53 then
                            -- Lua before 5.3 has either integers or floats
                            for is_int = 0, 1 do
