@@ -3,7 +3,7 @@
 -- PUC Lua 5.1, 5.2, 5.3 bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-07-01
+-- Version: 2019-07-02
 
 
 -- must have "double" Lua numbers
@@ -74,6 +74,8 @@ do
    function serialize_float_value(the_number, bytes_per_float)
       -- bytes_per_float: 4           = "the_number" is 64-bit float, but it contains a value stored somewhere as 32-bit float
       --                  8 (default) = "the_number" is 64-bit float, and it was loaded from 64-bit float value
+      -- The function returns a string (serialized float number) and a predicted_float64 (only when is_float32 = true)
+      -- math.type() of loaded string will be "float": the string is either a float literal (having "e" or decimal point) or float Lua expression (such as 3/7 or 2^20)
       if the_number ~= the_number then
          -- nan
          return "0/0"
@@ -123,6 +125,13 @@ do
                end
             end
          until truncated_mantissa
+         --local max_digits_before_decimal_point = 9             -- for "good fixed point format"
+         --local max_digits_after_decimal_point  = 9             -- for "good fixed point format"
+         --local max_digits_in_mantissa = is_float32 and 5 or 9  -- for "good fixed point format"
+         --local good_fixed =
+         --   #mantissa <= max_digits_in_mantissa
+         --   and exponent >= -max_digits_after_decimal_point
+         --   and exponent <= max_digits_before_decimal_point - #mantissa
          local good_fixed = exponent >= -9 and #mantissa <= 9 - exponent and #mantissa <= (is_float32 and 5 or 9)
          shortest =
             (good_fixed or exponent < 0 and exponent >= -6 - #mantissa)
@@ -390,22 +399,24 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
    local function read_int(first_byte)
       -- always mirrors to target bytecode
-      local value = 0
       if first_byte or Lua_version > 0x53 then
-         local ctr = 5
+         -- assuming the value is below 2^31
+         local value = 0
+         first_byte = first_byte or read_byte(true)
+         assert(first_byte > 0, "Overlong integer")
          repeat
-            assert(ctr > 0 and value < 2^24, "Integer overflow")
+            assert(value < 2^24, "Integer overflow")
             local b = first_byte or read_byte(true)
-            value, ctr, first_byte = value * 128 + b % 128, ctr - 1
-         until b > 127
+            value, first_byte = value * 128 + b
+         until b >= 128
+         return value - 128
       else
-         value = read_unsigned_int_as_double(bytes_per_int)
+         local value = read_unsigned_int_as_double(bytes_per_int)
          if convert_to_enbi then
             write_double_as_unsigned_int(convert_to_enbi.bytes_per_int, value)
          end
-         value = math.floor(value)
+         return math.floor(value)
       end
-      return value
    end
 
    local function read_string()
@@ -848,7 +859,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    end
 
    local function parse_proto(is_root_proto, parent_upv_qty)
-      local max_used_parent_upvalue_index, all_upvalues, upv_qty, source, debug_info = 0, {}  -- debug_info is a string: either "stripped" or "included"
+      local max_used_parent_upvalue_index, all_upvalues, upv_qty, source, debug_info = 0, {}  -- debug_info = "stripped"/"included"/nil
 
       if Lua_version >= 0x53 and is_root_proto then
          upv_qty = read_byte(true)
@@ -866,12 +877,19 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       -- [int line_start] debug info -- Line number in source code where chunk starts. 0 for the main chunk.
       local src_line_from = read_int()
       assert(is_root_proto or src_line_from > 0)
+      if src_line_from == 0 then  -- for main chunk
+         parent_upv_qty = 0
+      end
+
       -- [int line_end] debug info -- Line number in source code where chunk stops. 0 for the main chunk.
       local src_line_to = read_int()
       assert(src_line_to >= src_line_from)
 
       if Lua_version == 0x51 then
          upv_qty = read_byte(true)
+         if src_line_from == 0 then  -- for main chunk
+            assert(upv_qty == 0)
+         end
          for j = 1, upv_qty do
             all_upvalues[j] = {}
          end
@@ -1083,6 +1101,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             end
             all_upvalues[j] = {in_locals = in_locals, index = index}    -- [1..n] = {in_locals=true/false, index=, var_name=}
          end
+         if src_line_from == 0 then  -- for main chunk
+            assert(upv_qty == 1 and all_upvalues[1].in_locals and all_upvalues[1].index == 0)
+         end
       end
 
       if Lua_version >= 0x53 then   -- starting with Lua 5.3, Upvalues and Prototypes were swapped in the bytecode layout
@@ -1163,7 +1184,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          -- [string name]  debug info
          all_upvalues[j].var_name = assert(read_string())
       end
-      if src_line_from == 0 and Lua_version >= 0x52 and upv_qty == 1 and all_upvalues[1].in_locals and all_upvalues[1].index == 0 and not all_upvalues[1].var_name then
+      if src_line_from == 0 and Lua_version >= 0x52 and not all_upvalues[1].var_name then
          -- if debug info is stripped, set the name of main chunk's upvalue
          all_upvalues[1].var_name = "_ENV"
 
@@ -1179,7 +1200,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             end
          end
 
-         -- propagate _ENV upvalue name recursively down to child prototypes
+         -- propagate _ENV upvalue's name recursively down to nested prototypes
          set_name_for_the_ENV_upvalue(all_protos, 1)
       end
 
@@ -1523,15 +1544,15 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             local_arg_contains_table = local_arg_contains_table,
             registers_needed = registers_needed,
             const_qty = const_qty,
-            all_consts = all_consts,
+            all_consts = all_consts,                  -- [1..n] = {type="nil/boolean/string/float/integer", value=, value_as_text=, location_in_file=}
             upv_qty = upv_qty,
-            all_upvalues = all_upvalues,
+            all_upvalues = all_upvalues,              -- [1..n] = {in_locals=true/false, index=, var_name=}
             locals_qty = locals_qty,
-            all_locals = all_locals,
+            all_locals = all_locals,                  -- [1..n] = {var_name=, start_pc=, end_pc=, reg_no=, def_pc=}
             instr_qty = instr_qty,
-            all_instructions = all_instructions,
+            all_instructions = all_instructions,      -- [1..n] = {opcode=, A=, B=, C=, k=, name=, location_in_file="...", src_line_no=, instr_as_text=, instr_as_luac=, is_reachable=}
             protos_qty = protos_qty,
-            all_protos = all_protos,
+            all_protos = all_protos,                  -- [1..n] = Proto object
          },
          debug_info,
          max_used_parent_upvalue_index
@@ -1577,6 +1598,25 @@ end
 
 
 local function print_proto_object(Print, proto_object, Lua_version, depth, debug_info_is_stripped, subfunc_idx, path)
+   -- Fields of Proto object:
+   --    source
+   --    src_line_from
+   --    src_line_to
+   --    parameters_qty             -- The local variable "arg" (exists when VARARG_NEEDSARG=1) is not counted in parameters_qty
+   --    is_vararg
+   --    has_local_arg
+   --    local_arg_contains_table
+   --    registers_needed
+   --    const_qty
+   --    all_consts                -- [1..n] = {type="nil/boolean/string/float/integer", value=, value_as_text=, location_in_file=}
+   --    upv_qty
+   --    all_upvalues              -- [1..n] = {in_locals=true/false, index=, var_name=}
+   --    locals_qty
+   --    all_locals                -- [1..n] = {start_pc=, end_pc=, var_name=, reg_no=, def_pc=}
+   --    instr_qty
+   --    all_instructions          -- [1..n] = {opcode=, A=, B=, C=, k=, name=, location_in_file="...", src_line_no=, instr_as_text=, instr_as_luac=, is_reachable=}
+   --    protos_qty
+   --    all_protos                -- [1..n] = Proto object
    local indent = ("\t"):rep(depth)
    Print()
    if depth > 0 then
