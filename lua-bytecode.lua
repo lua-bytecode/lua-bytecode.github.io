@@ -1,9 +1,9 @@
 -- lua-bytecode.lua
 
--- PUC Lua 5.1, 5.2, 5.3 bytecode viewer and converter
+-- PUC Lua (5.1, 5.2, 5.3, 5.4.0-alpha) bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-07-02
+-- Version: 2019-07-05
 
 
 -- must have "double" Lua numbers
@@ -205,7 +205,7 @@ do
 
 end
 
-local serialize_string_value
+local serialize_string_value, is_correct_identifier
 do
    local escapings={["\a"]="\\a", ["\b"]="\\b", ["\t"]="\\t", ["\n"]="\\n", ["\v"]="\\v", ["\f"]="\\f", ["\r"]="\\r", ['"']='\\"', ["\\"]="\\\\"}
 
@@ -213,71 +213,190 @@ do
       return '"'..str:gsub('[%c"\\]', function(c) return escapings[c] or ("\a%03d"):format(c:byte()) end):gsub("\a(%d%d%d%d)", "\\%1"):gsub("\a0?0?", "\\")..'"'
    end
 
+   local is_keyword = {
+      ["and"]=0, ["break"]=0, ["do"]=0, ["else"]=0, ["elseif"]=0, ["end"]=0, ["false"]=0, ["for"]=0, ["function"]=0, ["goto"]=0, ["if"]=0,
+      ["in"]=0, ["local"]=0, ["nil"]=0, ["not"]=0, ["or"]=0, ["repeat"]=0, ["return"]=0, ["then"]=0, ["true"]=0, ["until"]=0, ["while"]=0
+   }
+
+   function is_correct_identifier(str, Lua_version)
+      return
+         str:find"^[A-Za-z_][A-Za-z0-9_]*$" and not is_keyword[str]
+         or Lua_version == 0x51 and str == "goto"
+   end
+
 end
 
+
+-- instr_modes = Table for disassembling
+--    instr_modes[1] = a string (misc info about instruction)
+--       1st character (can instruction jump to pc+1 or pc+2)
+--          "X" = this instruction can jump to pc+1
+--          "V" = this instruction can jump both to pc+1 and pc+2
+--          "C" = depends on C: if C>0 then pc+2; if C==0 then pc+1
+--          "." = this instruction can jump neither to pc+1 nor to pc+2 (return/tailcall/jmp)
+--          "L" = special case for SETLIST
+--          (if parameter sBx (in 5.3) or sJ (in 5.4) is present, then instruction can also jump to "pc+1+sBx/sJ" in addition to the options above)
+--       2nd character (for determining the pc of initialization of local variable):
+--          "-" = registers are not modified by this instruction
+--          "A" = only register A is modified
+--          "M" = multiple registers might be modified or custom processing is required
+--       4th and 5th characters ("B_mode" and "C_mode"):
+--          "N" = parameter B/C is not used
+--          "U" = parameter B/C is used as unsigned number or somehow else
+--          "S" = parameter B/C is used as signed number (s.) = unsigned-127
+--          "R" = parameter B/C is a register          (R.)
+--          "J" = parameter B/C is a jump offset       (+=sBx) (+=Bx) (+=sJ)
+--          "j" = parameter B/C is a jump offset backwards     (-=Bx)
+--          "K" = parameter B/C is a register/constant (RK.)     -- take parameter B/C as is
+--          "H" = parameter C   is a register/constant (RKC)     -- use k as highest bit of parameter C
+--          "k" = parameter B/C is an index of a constant (K.) (KBx)
+--       mode "i..k" means k is a parameter in this instruction
+
+-- sC is always integer
+-- sB might be either integer or float
+
 local instr_modes = {
-   ADD        = {"XA1KKiABC",   "", " + "},                --@  A B C   R(A) := RK(B) + RK(C)
-   BAND       = {"XA1KKiABC",   "", " & "},                --@  A B C   R(A) := RK(B) & RK(C)
-   BNOT       = {"XA2RNiAB",    "~ "},                     --@  A B     R(A) := ~R(B)
-   BOR        = {"XA1KKiABC",   "", " | "},                --@  A B C   R(A) := RK(B) | RK(C)
-   BXOR       = {"XA1KKiABC",   "", " ~ "},                --@  A B C   R(A) := RK(B) ~ RK(C)
-   CALL       = {"XM_UUiABC"},                             --@  A B C   R(A), ... ,R(A+C-2) := R(A)(R(A+1), ... ,R(A+B-1))
-   CLOSE      = {"X-3NNiA",     "CLOSE @R", ",.."},        --@  A       close all variables in the stack up to (>=) R(A)
-   CLOSURE    = {"XA2UNiABx",   "Function#"},              --@  A Bx    R(A) := closure(KPROTO[Bx])
-   CONCAT     = {"XA_RRiABC"},                             --@  A B C   R(A) := R(B).. ... ..R(C)
-   DIV        = {"XA1KKiABC",   "", " / "},                --@  A B C   R(A) := RK(B) / RK(C)
-   EQ         = {"V-_KKiABC"},                             --@  A B C   if ((RK(B) == RK(C)) ~= A) then pc++
-   EXTRAARG   = {"X-3UUiAx",    "EXTRA_ARG "},             --@  Ax      extra (larger) argument for previous opcode
-   FORLOOP    = {"X-_RNiAsBx"},                            --@  A sBx   R(A)+=R(A+2); if R(A) <?= R(A+1) then { pc+=sBx; R(A+3)=R(A) }
-   FORPREP    = {".M_RNiAsBx"},                            --@  A sBx   R(A)-=R(A+2); pc+=sBx
-   GETGLOBAL  = {"XA2KNiABx",   "GLOBALS[", "]"},          --@  A Bx    R(A) := Gbl[Kst(Bx)]
-   GETTABLE   = {"XA1RKiABC",   "", "[", "]"},             --@  A B C   R(A) := R(B)[RK(C)]
-   GETTABUP   = {"XA1UKiABC",   "@Upvalue#", "[", "]"},    --@  A B C   R(A) := UpValue[B][RK(C)]
-   GETUPVAL   = {"XA2UNiAB",    "@Upvalue#"},              --@  A B     R(A) := UpValue[B]
-   IDIV       = {"XA1KKiABC",   "", " // "},               --@  A B C   R(A) := RK(B) // RK(C)
-   JMP        = {".-_RNiAsBx"},                            --@  A sBx   pc+=sBx; if (A) close all upvalues >= R(A - 1)
-   JMP51      = {".-_RNisBx"},                             --@  sBx     pc+=sBx
-   LE         = {"V-_KKiABC"},                             --@  A B C   if ((RK(B) <= RK(C)) ~= A) then pc++
-   LEN        = {"XA2RNiAB",    "# "},                     --@  A B     R(A) := length of R(B)
-   LOADBOOL   = {"CA_UUiABC"},                             --@  A B C   R(A) := (Bool)B; if (C) pc++
-   LOADK      = {"XA2KNiABx"},                             --@  A Bx    R(A) := Kst(Bx)
-   LOADKX     = {"XA2NNiA"},                               --@  A       R(A) := Kst(extra arg)
-   LOADNIL    = {"XM_UNiAB"},                              --@  A B     R(A), R(A+1), ..., R(A+B) := nil
-   LOADNIL51  = {"XM_RNiAB"},                              --@  A B     R(A) := ... := R(B) := nil
-   LT         = {"V-_KKiABC"},                             --@  A B C   if ((RK(B) <  RK(C)) ~= A) then pc++
-   MOD        = {"XA1KKiABC",   "", " % "},                --@  A B C   R(A) := RK(B) % RK(C)
-   MOVE       = {"XA_RNiAB"},                              --@  A B     R(A) := R(B)
-   MUL        = {"XA1KKiABC",   "", " * "},                --@  A B C   R(A) := RK(B) * RK(C)
-   NEWTABLE   = {"XA_UUiABC"},                             --@  A B C   R(A) := {} (size = B,C)
-   NOT        = {"XA2RNiAB",    "not "},                   --@  A B     R(A) := not R(B)
-   POW        = {"XA1KKiABC",   "", " ^ "},                --@  A B C   R(A) := RK(B) ^ RK(C)
-   RETURN     = {".-_UNiAB"},                              --@  A B     return R(A), ... ,R(A+B-2)
-   SELF       = {"XM_RKiABC"},                             --@  A B C   R(A+1) := R(B); R(A) := R(B)[RK(C)]
-   SETGLOBAL  = {"X-4KNiABx",   "GLOBALS[", "] = @R"},     --@  A Bx    Gbl[Kst(Bx)] := R(A)
-   SETLIST    = {"L-_UUiABC"},                             --@  A B C   R(A)[(C-1)*FPF+i] := R(A+i), 1 <= i <= B
-   SETTABLE   = {"X-3KKiABC",   "@R", "[", "] = "},        --@  A B C   R(A)[RK(B)] := RK(C)
-   SETTABUP   = {"X-3KKiABC",   "@Upvalue#", "[", "] = "}, --@  A B C   UpValue[A][RK(B)] := RK(C)
-   SETUPVAL   = {"X-4UNiAB",    "@Upvalue#", " = @R"},     --@  A B     UpValue[B] := R(A)
-   SHL        = {"XA1KKiABC",   "", " << "},               --@  A B C   R(A) := RK(B) << RK(C)
-   SHR        = {"XA1KKiABC",   "", " >> "},               --@  A B C   R(A) := RK(B) >> RK(C)
-   SUB        = {"XA1KKiABC",   "", " - "},                --@  A B C   R(A) := RK(B) - RK(C)
-   TAILCALL   = {".-_UUiAB"},                              --@  A B     return R(A)(R(A+1), ... ,R(A+B-1))
-   TEST       = {"V-_NUiAC"},                              --@  A C     if not (R(A) <=> C) then pc++
-   TESTSET    = {"VA_RUiABC"},                             --@  A B C   if (R(B) <=> C) then R(A) := R(B) else pc++
-   TFORCALL   = {"X-_NUiAC"},                              --@  A C     R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2));
-   TFORLOOP   = {"XM_RNiAsBx"},                            --@  A sBx   if R(A+1) ~= nil then { R(A)=R(A+1); pc += sBx }
-   TFORLOOP51 = {"VM_NUiAC"},                              --@  A C     R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2)); if R(A+3) ~= nil then R(A+2)=R(A+3) else pc++
-   UNM        = {"XA2RNiAB",    "- "},                     --@  A B     R(A) := -R(B)
-   VARARG     = {"XM_UNiAB"},                              --@  A B     R(A), R(A+1), ..., R(A+B-2) = vararg
+   --[[1234]]   MOVE         = {"XA_RNiAB"},                              --@  A B        R(A) := R(B)
+   --[[--34]]   BNOT         = {"XA2RNiAB",    "~ "},                     --@  A B        R(A) := ~R(B)
+   --[[1234]]   UNM          = {"XA2RNiAB",    "- "},                     --@  A B        R(A) := -R(B)
+   --[[1234]]   LEN          = {"XA2RNiAB",    "# "},                     --@  A B        R(A) := length of R(B)
+   --[[1234]]   NOT          = {"XA2RNiAB",    "not "},                   --@  A B        R(A) := not R(B)
+
+   --[[1234]]   ADD          = {"XA1KKiABC",   "", " + "},                --@  A B C      R(A) := RK(B) + RK(C)
+   --[[---4]]   ADDI         = {"XA7RSiABCk",  " + "},                    --@  A B sC k   R(A) := R(B) + sC              (if k=1 then arguments are swapped)
+   --[[---4]]   ADDK         = {"XA5RkiABCk",  " + "},                    --@  A B C k    R(A) := R(B) + K(C)            (if k=1 then arguments are swapped)
+   --[[1234]]   MUL          = {"XA1KKiABC",   "", " * "},                --@  A B C      R(A) := RK(B) * RK(C)
+   --[[---4]]   MULI         = {"XA7RSiABCk",  " * "},                    --@  A B sC k   R(A) := R(B) * sC              (if k=1 then arguments are swapped)
+   --[[---4]]   MULK         = {"XA5RkiABCk",  " * "},                    --@  A B C k    R(A) := R(B) * K(C)            (if k=1 then arguments are swapped)
+   --[[1234]]   DIV          = {"XA1KKiABC",   "", " / "},                --@  A B C      R(A) := RK(B) / RK(C)
+   --[[---4]]   DIVI         = {"XA7RSiABC",   " / "},                    --@  A B sC     R(A) := R(B) / sC
+   --[[---4]]   DIVK         = {"XA5RkiABC",   " / "},                    --@  A B C      R(A) := R(B) / K(C)
+   --[[--34]]   IDIV         = {"XA1KKiABC",   "", " // "},               --@  A B C      R(A) := RK(B) // RK(C)
+   --[[---4]]   IDIVI        = {"XA7RSiABC",   " // "},                   --@  A B sC     R(A) := R(B) // sC
+   --[[---4]]   IDIVK        = {"XA5RkiABC",   " // "},                   --@  A B C      R(A) := R(B) // K(C)
+   --[[1234]]   MOD          = {"XA1KKiABC",   "", " % "},                --@  A B C      R(A) := RK(B) % RK(C)
+   --[[---4]]   MODI         = {"XA7RSiABC",   " % "},                    --@  A B sC     R(A) := R(B) % sC
+   --[[---4]]   MODK         = {"XA5RkiABC",   " % "},                    --@  A B C      R(A) := R(B) % K(C)
+   --[[1234]]   SUB          = {"XA1KKiABC",   "", " - "},                --@  A B C      R(A) := RK(B) - RK(C)
+   --[[---4]]   SUBI         = {"XA7RSiABC",   " - "},                    --@  A B sC     R(A) := R(B) - sC
+   --[[---4]]   SUBK         = {"XA5RkiABC",   " - "},                    --@  A B C      R(A) := R(B) - K(C)
+   --[[1234]]   POW          = {"XA1KKiABC",   "", " ^ "},                --@  A B C      R(A) := RK(B) ^ RK(C)
+   --[[---4]]   POWI         = {"XA7RSiABC",   " ^ "},                    --@  A B sC     R(A) := R(B) ^ sC
+   --[[---4]]   POWK         = {"XA5RkiABC",   " ^ "},                    --@  A B C      R(A) := R(B) ^ K(C)
+
+   --[[--34]]   BAND         = {"XA1KKiABC",   "", " & "},                --@  A B C      R(A) := RK(B) & RK(C)
+   --[[---4]]   BANDK        = {"XA6RkiABCk",  " & "},                    --@  A B C k    R(A) := R(B) & K(C):integer    (if k=1 then arguments are swapped)
+   --[[--34]]   BOR          = {"XA1KKiABC",   "", " | "},                --@  A B C      R(A) := RK(B) | RK(C)
+   --[[---4]]   BORK         = {"XA6RkiABCk",  " | "},                    --@  A B C k    R(A) := R(B) | K(C):integer    (if k=1 then arguments are swapped)
+   --[[--34]]   BXOR         = {"XA1KKiABC",   "", " ~ "},                --@  A B C      R(A) := RK(B) ~ RK(C)
+   --[[---4]]   BXORK        = {"XA6RkiABCk",  " ~ "},                    --@  A B C k    R(A) := R(B) ~ K(C):integer    (if k=1 then arguments are swapped)
+
+   --[[--34]]   SHL          = {"XA1KKiABC",   "", " << "},               --@  A B C      R(A) := RK(B) << RK(C)
+   --[[---4]]   SHLI         = {"XA_RSiABC"},                             --@  A B sC     R(A) := sC << R(B)
+   --[[--34]]   SHR          = {"XA1KKiABC",   "", " >> "},               --@  A B C      R(A) := RK(B) >> RK(C)
+   --[[---4]]   SHRI         = {"XA_RSiABCk"},                            --@  A B sC k   R(A) := R(B) >> sC             (if k=1 then R(B) << -sC)
+
+   --[[123-]]   CONCAT       = {"XA_RRiABC"},                             --@  A B C      R(A) := R(B).. ... ..R(C)
+   --[[---4]]   CONCAT54     = {"XA_UNiAB"},                              --@  A B        R(A) := R(A).. ... ..R(A+B-1)
+
+   --[[123-]]   EQ           = {"V-=KKiABC"},                             --@  A B C      if ((RK(B) == RK(C)) ~= A) then pc++
+   --[[123-]]   LE           = {"V-=KKiABC"},                             --@  A B C      if ((RK(B) <= RK(C)) ~= A) then pc++
+   --[[123-]]   LT           = {"V-=KKiABC"},                             --@  A B C      if ((RK(B) <  RK(C)) ~= A) then pc++
+   --[[---4]]   EQ54         = {"V-<RNiABk"},                             --@  A B k      if ((R(A) == R(B)) ~= k) then pc++
+   --[[---4]]   EQI          = {"V-<SUiABCk"},                            --@  A sB C k   if ((R(A) == sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+   --[[---4]]   EQK          = {"V-<kNiABk"},                             --@  A B k      if ((R(A) == K(B)) ~= k) then pc++
+   --[[---4]]   LE54         = {"V-<RNiABk"},                             --@  A B k      if ((R(A) <= R(B)) ~= k) then pc++
+   --[[---4]]   LEI          = {"V-<SUiABCk"},                            --@  A sB C k   if ((R(A) <= sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+   --[[---4]]   GEI          = {"V-<SUiABCk"},                            --@  A sB C k   if ((R(A) >= sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+   --[[---4]]   LT54         = {"V-<RNiABk"},                             --@  A B k      if ((R(A) <  R(B)) ~= k) then pc++
+   --[[---4]]   LTI          = {"V-<SUiABCk"},                            --@  A sB C k   if ((R(A) <  sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+   --[[---4]]   GTI          = {"V-<SUiABCk"},                            --@  A sB C k   if ((R(A) >  sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+
+   --[[1234]]   CALL         = {"XM_UUiABC"},                             --@  A B C      R(A), ... ,R(A+C-2) := R(A)(R(A+1), ... ,R(A+B-1))
+   --[[123-]]   VARARG       = {"XM_UNiAB"},                              --@  A B        R(A), R(A+1), ..., R(A+B-2) = vararg
+   --[[---4]]   VARARG54     = {"XM_NUiAC"},                              --@  A C        R(A), R(A+1), ..., R(A+C-2) = vararg
+   --[[123-]]   TAILCALL     = {".-_UNiAB"},                              --@  A B        return R(A)(R(A+1), ... ,R(A+B-1))
+   --[[---4]]   TAILCALL54   = {".-_UUiABCk"},                            --@  A B C k    return R(A)(R(A+1), ... ,R(A+B-1))
+   --[[123-]]   RETURN       = {".-_UNiAB"},                              --@  A B        return R(A), ... ,R(A+B-2)
+   --[[---4]]   RETURN54     = {".-_UUiABCk"},                            --@  A B C k    return R(A), ... ,R(A+B-2)
+   --[[---4]]   RETURN1      = {".-_NNiA"},                               --@  A          return R(A)    -- not a vararg function, no upvalues to close
+   --[[---4]]   RETURN0      = {".-_NNi"},                                --@             return         -- not a vararg function, no upvalues to close
+
+   --[[1---]]   LOADNIL51    = {"XM_RNiAB"},                              --@  A B        R(A), R(A+1), ..., R(B) := nil
+   --[[-234]]   LOADNIL      = {"XM_UNiAB"},                              --@  A B        R(A), R(A+1), ..., R(A+B) := nil
+   --[[1234]]   LOADBOOL     = {"CA_UUiABC"},                             --@  A B C      R(A) := (Bool)B; if (C) pc++
+   --[[---4]]   LOADF        = {"XA_UNiAsBx"},                            --@  A sBx      R(A) := (lua_Number)sBx
+   --[[---4]]   LOADI        = {"XA_UNiAsBx"},                            --@  A sBx      R(A) := sBx
+   --[[1234]]   LOADK        = {"XA2kNiABx"},                             --@  A Bx       R(A) := K(Bx)
+   --[[-234]]   LOADKX       = {"XA2NNiA"},                               --@  A          R(A) := K(extra arg)
+
+   --[[1234]]   NEWTABLE     = {"XA_UUiABC"},                             --@  A B C      R(A) := {} (size = B,C)
+   --[[1234]]   CLOSURE      = {"XA2UNiABx",   "Function#"},              --@  A Bx       R(A) := closure(KPROTO[Bx])
+   --[[-234]]   EXTRAARG     = {"X-3NNiAx",    "EXTRA_ARG "},             --@  Ax         extra (larger) argument for previous opcode
+   --[[1234]]   SELF         = {"XM_RHiABCk"},                            --@  A B C k    R(A+1) := R(B); R(A) := R(B)[RK(C):string]
+   --[[1234]]   SETLIST      = {"L-_UUiABC"},                             --@  A B C      R(A)[(C-1)*50+i] := R(A+i), 1 <= i <= B   (if C==0 then C=extra arg)
+   --[[---4]]   VARARGPREP   = {"X-3NNiA",     "(vararg function has ", " fixed parameters)"}, --@  A          (adjust vararg parameters)
+   --[[---4]]   TBC          = {"X-3NNiA",     "mark @R", " 'to-be-closed'"},                  --@  A          mark R(A) "to be closed"
+   --[[1--4]]   CLOSE        = {"X-3NNiA",     "CLOSE @R", ",.."},        --@  A          close all upvalues >= R(A)
+   --[[-23-]]   JMP          = {".-_JNiAsBx"},                            --@  A sBx      pc+=sBx; if (A) close all upvalues >= R(A - 1)
+   --[[1---]]   JMP51        = {".-_JNisBx"},                             --@  sBx        pc+=sBx
+   --[[---4]]   JMP54        = {".-_NNisJ"},                              --@  sJ         pc+=sJ
+
+   --[[1234]]   SETUPVAL     = {"X-4UNiAB",    "@Upvalue#", " = @R"},     --@  A B        UpValue[B] := R(A)
+   --[[1234]]   GETUPVAL     = {"XA2UNiAB",    "@Upvalue#"},              --@  A B        R(A) := UpValue[B]
+   --[[-23-]]   GETTABUP     = {"XA1UKiABC",   "@Upvalue#", "[", "]"},    --@  A B C      R(A) := UpValue[B][RK(C)]
+   --[[---4]]   GETTABUP54   = {"XA1UkiABC",   "@Upvalue#", "[", "]"},    --@  A B C      R(A) := UpValue[B][K(C):string]
+   --[[-23-]]   SETTABUP     = {"X-3KKiABC",   "@Upvalue#", "[", "] = "}, --@  A B C      UpValue[A][RK(B)] := RK(C)
+   --[[---4]]   SETTABUP54   = {"X-3kHiABCk",  "@Upvalue#", "[", "] = "}, --@  A B C k    UpValue[A][K(B):string] := RK(C)
+   --[[1---]]   GETGLOBAL    = {"XA2kNiABx",   "GLOBALS[", "]"},          --@  A Bx       R(A) := Gbl[K(Bx)]
+   --[[1---]]   SETGLOBAL    = {"X-4kNiABx",   "GLOBALS[", "] = @R"},     --@  A Bx       Gbl[K(Bx)] := R(A)
+   --[[1234]]   GETTABLE     = {"XA1RKiABC",   "", "[", "]"},             --@  A B C      R(A) := R(B)[RK(C)]
+   --[[---4]]   GETFIELD     = {"XA1RkiABC",   "", "[", "]"},             --@  A B C      R(A) := R(B)[K(C):string]
+   --[[---4]]   GETI         = {"XA1RUiABC",   "", "[", "]"},             --@  A B C      R(A) := R(B)[C]
+   --[[1234]]   SETTABLE     = {"X-3KHiABCk",  "@R", "[", "] = "},        --@  A B C k    R(A)[RK(B)] := RK(C)
+   --[[---4]]   SETFIELD     = {"X-3kHiABCk",  "@R", "[", "] = "},        --@  A B C k    R(A)[K(B):string] := RK(C)
+   --[[---4]]   SETI         = {"X-3UHiABCk",  "@R", "[", "] = "},        --@  A B C k    R(A)[B] := RK(C)
+
+   --[[123-]]   TEST         = {"V-_NUiAC"},                              --@  A C        if not (R(A) <=> C) then pc++                      (x<=>y means boolean(x)==boolean(y))
+   --[[---4]]   TEST54       = {"V-_NUiAk"},                              --@  A k        if (not R(A) == k) then pc++
+   --[[123-]]   TESTSET      = {"VA_RUiABC"},                             --@  A B C      if (R(B) <=> C) then R(A) := R(B) else pc++        (x<=>y means boolean(x)==boolean(y))
+   --[[---4]]   TESTSET54    = {"VA_RNiABk"},                             --@  A B k      if (not R(B) == k) then pc++ else R(A) := R(B)
+
+   --[[123-]]   FORPREP      = {".M8JNiAsBx"},                            --@  A sBx      R(A) -= R(A+2); pc+=sBx
+   --[[---4]]   FORPREP54    = {"XM8JNiABx"},                             --@  A Bx       if R(A) >? R(A+1) then pc+=Bx+1 else R(A+3) := R(A)
+   --[[123-]]   FORLOOP      = {"X-9JNiAsBx"},                            --@  A sBx      R(A) += R(A+2); if R(A) <?= R(A+1) then { R(A+3) := R(A); pc+=sBx }
+   --[[---4]]   FORLOOP54    = {"X-9jNiABx"},                             --@  A Bx       R(A) += R(A+2); if R(A) <?= R(A+1) then { R(A+3) := R(A); pc-=Bx }
+
+   --[[1---]]   TFORLOOP51   = {"VM_NUiAC"},                              --@  A C        R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2)); if R(A+3) ~= nil then R(A+2)=R(A+3) else pc++
+   --[[---4]]   TFORPREP     = {".-_JNiABx"},                             --@  A Bx       mark R(A+3) "to be closed";  pc+=Bx
+   --[[-23-]]   TFORCALL     = {"X-_NUiAC"},                              --@  A C        R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2))
+   --[[---4]]   TFORCALL54   = {"X-_NUiAC"},                              --@  A C        R(A+4), ... ,R(A+3+C) := R(A)(R(A+1), R(A+2))
+   --[[-23-]]   TFORLOOP     = {"XM_JNiAsBx"},                            --@  A sBx      if R(A+1) ~= nil then { R(A)=R(A+1); pc+=sBx }
+   --[[---4]]   TFORLOOP54   = {"XM_jNiABx"},                             --@  A Bx       if R(A+2) ~= nil then { R(A)=R(A+2); pc-=Bx }
 }
 
-local function make_arg(B, B_mode, is_really_an_instruction)
+local function negative_in_parentheses(n)
+   if n < 0 then
+      return "("..n..")"
+   else
+      return tostring(n)
+   end
+end
+
+local function make_arg(B, B_mode, is_really_an_instruction, k)
+   if B_mode == "H" then
+      B_mode = "K"
+      B = B + (k or 0) * 256
+   end
    if B_mode == "K" and B < 256 or B_mode == "R" then
       assert(not is_really_an_instruction or B < 256, "Must be a register")
       return "@R"..B, B
-   elseif B_mode == "K" then
+   elseif B_mode == "K" or B_mode == "k" then
       B = B % 256 + 1
       return "@Const#"..B, -B
+   elseif B_mode == "S" then
+      B = B - 127
+      return negative_in_parentheses(B), B
    else
       assert(B_mode == "U")
       return B, B
@@ -400,12 +519,11 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    local function read_int(first_byte)
       -- always mirrors to target bytecode
       if first_byte or Lua_version > 0x53 then
-         -- assuming the value is below 2^31
          local value = 0
          first_byte = first_byte or read_byte(true)
          assert(first_byte > 0, "Overlong integer")
          repeat
-            assert(value < 2^24, "Integer overflow")
+            assert(value < 2^24, "Integer is beyond int32 range")  -- Lua integer under Fengari is 32-bit
             local b = first_byte or read_byte(true)
             value, first_byte = value * 128 + b
          until b >= 128
@@ -577,14 +695,26 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          -- always mirrors to target bytecode
          local LE_block, file_offset, data_in_file = read_LE_block(4, true)
          bits_in_buffer, str_in_LE_order, str_pos = 0, LE_block, 0
-         -- Instruction format:
-         --    31........................0
-         --    B(9)..C(9)..A(8)..opcode(6)
-         local opcode = math.floor(read_field(6))
-         local A = math.floor(read_field(8))
-         local C = math.floor(read_field(9))
-         local B = math.floor(read_field(9))
-         return opcode, A, B, C, file_offset, data_in_file
+         local opcode, A, B, C, k
+         if Lua_version == 0x54 then
+            -- Instruction format:
+            --    31..............................0
+            --    C(8)..B(8)..k(1)..A(8)..opcode(7)
+            opcode = math.floor(read_field(7))
+            A = math.floor(read_field(8))
+            k = math.floor(read_field(1))
+            B = math.floor(read_field(8))
+            C = math.floor(read_field(8))
+         else
+            -- Instruction format:
+            --    31........................0
+            --    B(9)..C(9)..A(8)..opcode(6)
+            opcode = math.floor(read_field(6))
+            A = math.floor(read_field(8))
+            C = math.floor(read_field(9))
+            B = math.floor(read_field(9))
+         end
+         return opcode, A, B, C, k, file_offset, data_in_file
       end
 
       function read_lua_float()
@@ -688,7 +818,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       local minor_version = Lua_version % version_factor
       Lua_version = major_version * 16 + minor_version
       Lua_version_as_string = major_version.."."..minor_version
-      assert(minor_version < 16 and major_version < 16 and Lua_version >= 0x51 and Lua_version <= 0x53, "Lua version "..Lua_version_as_string.." is not supported")
+      assert(minor_version < 16 and major_version < 16 and Lua_version >= 0x51 and Lua_version <= 0x54, "Lua version "..Lua_version_as_string.." is not supported")
    end
    -- [u8 impl] Implementation (0 = the bytecode is compatible with the "official" PUC-Rio implementation)
    assert(read_byte(true) == 0, "Bytecode is incompatible with PUC-Rio implementation")
@@ -721,7 +851,14 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
    local instr_names = {}  -- [opcode] = "instruction name"
    do
-      local all_instr = "0 MOVE LOADK 52+ LOADKX 0 LOADBOOL 51 LOADNIL51 52+ LOADNIL 0 GETUPVAL 51 GETGLOBAL 52+ GETTABUP 0 GETTABLE 51 SETGLOBAL 52+ SETTABUP 0 SETUPVAL SETTABLE NEWTABLE SELF ADD SUB MUL 52- DIV 0 MOD POW 53 DIV IDIV BAND BOR BXOR SHL SHR 0 UNM 53 BNOT 0 NOT LEN CONCAT 51 JMP51 52+ JMP 0 EQ LT LE TEST TESTSET CALL TAILCALL RETURN FORLOOP FORPREP 51 TFORLOOP51 52+ TFORCALL TFORLOOP 0 SETLIST 51 CLOSE 0 CLOSURE VARARG 52+ EXTRAARG"
+      local all_instr = "0 MOVE 54 LOADI LOADF 0 LOADK 52+ LOADKX 0 LOADBOOL 51 LOADNIL51 52+ LOADNIL 0 GETUPVAL 54 SETUPVAL 51 GETGLOBAL 52-53 GETTABUP 54 GETTABUP54 0 GETTABLE 54 GETI GETFIELD 51 SETGLOBAL 52-53 SETTABUP 54 SETTABUP54 53- SETUPVAL 0 SETTABLE 54 SETI SETFIELD 0 NEWTABLE SELF 54 ADDI SUBI MULI MODI POWI DIVI IDIVI ADDK SUBK MULK MODK POWK DIVK IDIVK BANDK BORK BXORK SHRI SHLI 0 ADD SUB MUL 52- DIV 0 MOD POW 53+ DIV IDIV BAND BOR BXOR SHL SHR 0 UNM 53+ BNOT 0 NOT LEN 53- CONCAT 54 CONCAT54 CLOSE TBC 51 JMP51 52-53 JMP 54 JMP54 53- EQ LT LE 54 EQ54 LT54 LE54 EQK EQI LTI LEI GTI GEI 53- TEST TESTSET 54 TEST54 TESTSET54 0 CALL 53- TAILCALL 54 TAILCALL54 53- RETURN 54 RETURN54 RETURN0 RETURN1 53- FORLOOP FORPREP 51 TFORLOOP51 52-53 TFORCALL TFORLOOP 54 FORLOOP54 FORPREP54 TFORPREP TFORCALL54 TFORLOOP54 0 SETLIST 51 CLOSE 0 CLOSURE 53- VARARG 54 VARARG54 VARARGPREP 52+ EXTRAARG"
+      -- Version mark is applied to all instruction names that follow it until the next version mark is encountered:
+      --   "0"        = in all Lua versions
+      --   "5x"       = only in 5.x
+      --   "5x-5y"    = in all versions from 5.x to 5.y inclusive
+      --   "5x+"      = in 5.x and all next versions
+      --   "5x-"      = in 5.x and all previous versions
+      --   comma means "or", for example: "5x-,5y,5z-5t"
       local version_pattern, idx_dest, is_relevant = "5%d", 0
       version_pattern = version_pattern:gsub("%%", "%%%%")
       for word in all_instr:gmatch"%S+" do
@@ -846,8 +983,14 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
    local function get_extra_arg(next_instr)
       -- B(9)..C(9)..A(8)..opcode(6)
-      local A, B, C, opcode, name = next_instr.A, next_instr.B, next_instr.C, next_instr.opcode, next_instr.name
-      local Ax = (B * 512 + C) * 256 + A
+      -- C(8)..B(8)..k(1)..A(8)..opcode(7)
+      local A, B, C, k, opcode, name = next_instr.A, next_instr.B, next_instr.C, next_instr.k, next_instr.opcode, next_instr.name
+      local Ax
+      if Lua_version == 0x54 then
+         Ax = ((C * 256 + B) * 2 + k) * 256 + A
+      else
+         Ax = (B * 512 + C) * 256 + A
+      end
       if Lua_version == 0x51 then
          -- extra arg in Lua 5.1 is used only for SETLIST instruction, and I hope a table size would be < 1e11
          assert(Ax > 7 and Ax < 2^25)  -- hence, we can restrict extra arg value to be a positive int32, because 1e11/50 < 2^31
@@ -856,6 +999,17 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          assert(name == "EXTRAARG")
       end
       return Ax
+   end
+
+   local is_global_var_name, next_var_num = {}, 1
+
+   local function generate_next_name()
+      local name
+      repeat
+         name, next_var_num = tostring(next_var_num), next_var_num + 1
+         name = "V"..("0"):rep(3 - #name)..name
+      until not is_global_var_name[name]
+      return name
    end
 
    local function parse_proto(is_root_proto, parent_upv_qty)
@@ -929,20 +1083,21 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       -- Instructions
       local instr_qty = read_int()
       assert(instr_qty > 0)
-      local all_instructions = {}  -- [1..n] = {opcode=, A=, B=, C=, name=, location_in_file="...", src_line_no=, instr_as_text=, instr_as_luac=, is_reachable=}
+      local all_instructions = {}  -- [1..n] = {opcode=, A=, B=, C=, k=, name=, location_in_file="...", src_line_no=, instr_as_text=, instr_as_luac=, is_reachable=}
       -- [int ninstructions]
       for j = 1, instr_qty do
          -- [instsize instruction]
-         local opcode, A, B, C, file_offset, data_in_file = read_instruction()
+         local opcode, A, B, C, k, file_offset, data_in_file = read_instruction()
          local instr_name = instr_names[opcode]
          local location_in_file = ("+%04X: %02X %02X %02X %02X"):format(file_offset, data_in_file:byte(1, 4))
-         all_instructions[j] = {opcode = opcode, A = A, B = B, C = C, name = instr_name, location_in_file = location_in_file}
+         all_instructions[j] = {opcode = opcode, A = A, B = B, C = C, k = k, name = instr_name, location_in_file = location_in_file}
       end
 
       -- Determine unreachable instructions
       do
          local fresh_pc_list = {1}
          all_instructions[1].is_reachable = true
+         local jump_dir = {FORPREP54 = 1, FORLOOP54 = -1, TFORPREP = 1, TFORLOOP54 = -1}
          repeat
             local new_fresh_pc_list = {}
             for _, pc in ipairs(fresh_pc_list) do
@@ -951,7 +1106,17 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                if name then
                   local m = instr_modes[name][1]
                   deltas = {}
-                  if m:match"sBx$" then
+                  if Lua_version == 0x54 then
+                     local Bx = (instr.C * 256 + instr.B) * 2 + instr.k
+                     -- some Lua 5.4 VM instructions can jump +-Bx
+                     local dir = jump_dir[name]
+                     if dir then
+                        table.insert(deltas, dir * Bx)  -- pc+1+-Bx
+                     elseif m:match"sJ$" then
+                        -- if a Lua 5.4 VM instruction has parameter sJ then it can jump +sJ
+                        table.insert(deltas, Bx * 256 + instr.A - 16777215)  -- pc+1+sJ
+                     end
+                  elseif m:match"sBx$" then
                      -- if a Lua 5.1-5.3 VM instruction has parameter sBx then it can jump +sBx
                      table.insert(deltas, instr.B * 512 + instr.C - 131071)  -- pc+1+sBx
                   end
@@ -989,7 +1154,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- Determine instructions reading/writing 'top'
       do
-         local readers = {CALL = true, TAILCALL = true, RETURN = true, SETLIST = true}
+         local readers = {CALL = true, TAILCALL = true, TAILCALL54 = true, RETURN = true, RETURN54 = true, SETLIST = true}
          for pc = 1, instr_qty do
             local instr = all_instructions[pc]
             if instr.is_reachable then
@@ -998,7 +1163,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                   instr.reads_top = true
                end
                if
-                  name == "CALL" and C == 0
+                  (name == "VARARG54" or name == "CALL") and C == 0
                   or name == "VARARG" and B == 0
                then
                   instr.writes_top = true
@@ -1143,9 +1308,41 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       local new_debug_info = lines_qty > 0 and "included" or "stripped"
       debug_info = debug_info or new_debug_info
       assert(debug_info == new_debug_info)
-      for j = 1, lines_qty do
-         -- [int line]
-         all_instructions[j].src_line_no = read_int()
+      if Lua_version <= 0x53 then
+         for j = 1, lines_qty do
+            -- [int line]
+            all_instructions[j].src_line_no = read_int()
+         end
+      else
+         local diff, abs_no = {}, {}
+         for j = 1, lines_qty do
+            -- [signed byte line_diff]
+            local d = read_byte(true)
+            diff[j] = d > 127 and d - 256 or d
+         end
+         -- [int nabslines]
+         local abs_lines_qty = read_int()
+         assert(
+            debug_info == "included" and abs_lines_qty <= lines_qty or
+            debug_info == "stripped" and abs_lines_qty == 0
+         )
+         local prev_pc = 0
+         for j = 1, abs_lines_qty do
+            -- [int pc]
+            local pc = read_int() + 1
+            assert(pc > prev_pc and diff[pc] == -128)
+            -- [int line]
+            local abs_line_no = read_int()
+            assert(abs_line_no >= 1)
+            abs_no[pc] = abs_line_no
+            prev_pc = pc
+         end
+         local line_no = src_line_from
+         for j = 1, lines_qty do
+            local d = diff[j]
+            line_no = d == -128 and assert(abs_no[j]) or line_no + d
+            all_instructions[j].src_line_no = line_no
+         end
       end
 
       -- [int nlocals]
@@ -1206,27 +1403,48 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- Disassembling (preparing fields instr_as_luac and instr_as_text) without resolving upvalue, local, const names
       local data_items_ahead, data_descr = 0
-      local last_closure_51_pc, last_closure_51_upvalues, pc_after_TFORLOOP51
+      local last_closure_51_pc, last_closure_51_upvalues, loop_statement
       for pc = 1, instr_qty do
          local instr = all_instructions[pc]
-         local A, B, C, name, is_reachable = instr.A, instr.B, instr.C, instr.name, instr.is_reachable
-         local Bx = B * 512 + C
-         local sBx = Bx - 131071
+         local A, B, C, k, name, is_reachable = instr.A, instr.B, instr.C, instr.k, instr.name, instr.is_reachable
+         local sC, Bx, sBx = C - 127
+         if Lua_version <= 0x53 then
+            Bx = B * 512 + C
+            sBx = Bx - 131071
+         else
+            Bx = (C * 256 + B) * 2 + k
+            sBx = Bx - 65535
+         end
          local Ax = Bx * 256 + A
+         local sJ = Ax - 16777215
          local instr_as_luac, instr_as_text
          local is_really_an_instruction = data_items_ahead == 0
          if name then
-            local mode = assert(instr_modes[name])
-            local data_1, data_2, data_3, data_4 = mode[2] or "", mode[3] or "", mode[4] or "", mode[5] or ""
-            local instr_writes_to = mode[1]:sub(2, 2)
-            local group           = mode[1]:sub(3, 3)
-            local B_mode          = mode[1]:sub(4, 4)
-            local C_mode          = mode[1]:sub(5, 5)
-            mode = mode[1]:sub(6)
+            local instr_info = assert(instr_modes[name])
+            local data_1, data_2, data_3, data_4 = instr_info[2] or "", instr_info[3] or "", instr_info[4] or "", instr_info[5] or ""
+            local instr_writes_to, group, B_mode, C_mode, mode, k_matters = assert(instr_info[1]:match"^.(.)(.)(.)(.)(i.-)(k?)$")
+            k_matters = k and k_matters ~= ""
+            --------------------------------------------------------------------------------
+            -- Instruction Modes 5.1-5.3:
+            --    iABC
+            --    iABx    Bx = B..C
+            --    iAsBx   signed Bx = unsigned(B..C) - (2^17-1)
+            --    iAx     Ax = B..C..A
+            --------------------------------------------------------------------------------
+            -- Instruction Modes 5.4:
+            --            3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0
+            --            1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+            --    iABCk        C(8)     |      B(8)     |k|     A(8)      |  Opcode(7)  |
+            --    iABC         C(8)     |      B(8)     | |     A(8)      |  Opcode(7)  |
+            --    iABx               Bx(17)               |     A(8)      |  Opcode(7)  |
+            --    iAsBx             sBx (signed)(17)      |     A(8)      |  Opcode(7)  |
+            --    iAx                           Ax(25)                    |  Opcode(7)  |
+            --    isJ                           sJ(25)                    |  Opcode(7)  |
+            --------------------------------------------------------------------------------
             local params, params_luac
             if mode == "iABC" then
                local B_arg, B_arg_luac = make_arg(B, B_mode, is_really_an_instruction)
-               local C_arg, C_arg_luac = make_arg(C, C_mode, is_really_an_instruction)
+               local C_arg, C_arg_luac = make_arg(C, C_mode, is_really_an_instruction, k)
                params = {A, B_arg, C_arg}
                params_luac = {A, B_arg_luac, C_arg_luac}
             elseif mode == "iAB" then
@@ -1234,7 +1452,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                params = {A, B_arg}
                params_luac = {A, B_arg_luac}
             elseif mode == "iAC" then
-               local C_arg, C_arg_luac = make_arg(C, C_mode, is_really_an_instruction)
+               local C_arg, C_arg_luac = make_arg(C, C_mode, is_really_an_instruction, k)
                params = {A, C_arg}
                params_luac = {A, C_arg_luac}
             elseif mode == "iA" then
@@ -1242,29 +1460,53 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                params_luac = params
             elseif mode == "iABx" then
                if is_really_an_instruction then
-                  assert(B_mode == "U" or B_mode == "K")
-                  params = {A, B_mode == "K" and "@Const#"..(Bx + 1) or Bx}
+                  if B_mode == "J" or B_mode == "j" then
+                     local target_pc = pc + 1 + Bx * (B_mode == "J" and 1 or -1)
+                     assert(target_pc > 0)
+                     params = {A, "<"..target_pc..">"}
+                  elseif B_mode == "k" then
+                     params = {A, "@Const#"..(Bx + 1)}
+                  else
+                     assert(B_mode == "U")
+                     params = {A, Bx}
+                  end
                end
-               params_luac = {A, B_mode == "K" and -1-Bx or Bx}
+               params_luac = {A, B_mode == "k" and -1-Bx or Bx}
             elseif mode == "iAsBx" then
                if is_really_an_instruction then
-                  assert(B_mode == "R")
-                  params = {A, "<"..(pc + 1 + sBx)..">"}
+                  if B_mode == "J" then
+                     local target_pc = pc + 1 + sBx
+                     assert(target_pc > 0)
+                     params = {A, "<"..target_pc..">"}
+                  else
+                     assert(B_mode == "U")
+                     params = {A, sBx}
+                  end
                end
                params_luac = {A, sBx}
             elseif mode == "isBx" then
                if is_really_an_instruction then
-                  assert(B_mode == "R")
-                  params = {"<"..(pc + 1 + sBx)..">"}
+                  assert(B_mode == "J")
+                  local target_pc = pc + 1 + sBx
+                  assert(target_pc > 0)
+                  params = {"<"..target_pc..">"}
                end
                params_luac = {sBx}
+            elseif mode == "isJ" then
+               local target_pc = pc + 1 + sJ
+               assert(target_pc > 0)
+               params = {"<"..target_pc..">"}
+               params_luac = {sJ}
             elseif mode == "iAx" then
                params = {Ax}
+               params_luac = params
+            elseif mode == "i" then
+               params = {}
                params_luac = params
             else
                error"Wrong instruction mode"
             end
-            instr_as_luac = name:gsub("51$", "").." "..table.concat(params_luac, " ")
+            instr_as_luac = name:gsub("5[14]$", "").." "..table.concat(params_luac, " ")..(k_matters and " "..k or "")
             if is_reachable then
                if is_really_an_instruction then
                   if instr.reads_top then
@@ -1273,10 +1515,20 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                   if instr.writes_top then
                      assert(all_instructions[pc + 1].reads_top)
                   end
+                  local const_with_global_var_name
                   if group == "1" then  -- binary operators
                      assert(mode == "iABC")
                      if name == "GETTABUP" then
                         params[2] = B + 1
+                        const_with_global_var_name = C - 255
+                     elseif name == "GETTABUP54" then
+                        params[2] = B + 1
+                        const_with_global_var_name = C + 1
+                        local const = all_consts[const_with_global_var_name]
+                        assert(const and const.type == "string", "GETTABUP with non-string key")
+                     elseif name == "GETFIELD" then
+                        local const = all_consts[C + 1]
+                        assert(const and const.type == "string", "GETFIELD with non-string key")
                      end
                      instr_as_text = "@@R"..A.." = "..data_1..params[2]..data_2..params[3]..data_3
                   elseif group == "2" then   -- unary operators
@@ -1295,20 +1547,65 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                            if Lua_version == 0x51 then
                               data_items_ahead, data_descr, last_closure_51_pc, last_closure_51_upvalues = all_protos[Bx + 1].upv_qty, "upvalue_info_51", pc, all_protos[Bx + 1].all_upvalues
                            end
+                        elseif name == "GETGLOBAL" then
+                           const_with_global_var_name = Bx + 1
+                           local const = all_consts[const_with_global_var_name]
+                           assert(const and const.type == "string" and is_correct_identifier(const.value, Lua_version), "GETGLOBAL with invalid global variable name")
                         end
                      end
                      instr_as_text = "@@R"..A.." = "..data_1..params[2]..data_2
                   elseif group == "3" or group == "4" then
                      if name == "SETTABUP" then
                         params[1] = A + 1
+                        const_with_global_var_name = B - 255
+                     elseif name == "SETTABUP54" then
+                        params[1] = A + 1
+                        const_with_global_var_name = B + 1
+                        local const = all_consts[const_with_global_var_name]
+                        assert(const and const.type == "string", "SETTABUP with non-string key")
                      elseif name == "SETUPVAL" then
                         params[2] = B + 1
+                     elseif name == "SETGLOBAL" then
+                        const_with_global_var_name = Bx + 1
+                        local const = all_consts[const_with_global_var_name]
+                        assert(const and const.type == "string" and is_correct_identifier(const.value, Lua_version), "SETGLOBAL with invalid global variable name")
+                     elseif name == "SETFIELD" then
+                        local const = all_consts[B + 1]
+                        assert(const and const.type == "string", "SETFIELD with non-string key")
+                     elseif name == "VARARGPREP" then
+                        assert(parameters_qty == A, "VARARGPREP with wrong number of fixed parameters")
                      end
+                     -- group == "3" -- the same order of parameters
+                     -- group == "4" -- first two parameters swapped
                      local param1, param2 = params[1], params[2]
                      if group == "4" then
                         param1, param2 = param2, param1
                      end
                      instr_as_text = data_1..param1..data_2..(param2 or "")..data_3..(params[3] or "")..data_4
+                  elseif group == "5" or group == "6" or group == "7" then
+                     -- binary operators with constant(5,6) or immediate integer(7) and sometimes swapped arguments
+                     assert(mode == "iABC")
+                     if group ~= "7" then
+                        local const = assert(all_consts[C + 1])
+                        if group == "6" then
+                           assert(const.type == "integer", "bitwise operator with non-integer constant")
+                        end
+                     end
+                     local param2, param3 = params[2], params[3]
+                     if k_matters and k == 1 then
+                        param2, param3 = param3, param2
+                     end
+                     instr_as_text = "@@R"..A.." = "..param2..data_1..param3
+                  elseif name == "SHRI" then
+                     -- A B sC k   R(A) := R(B) >> sC                  (if k=1 then R(B) << -sC)
+                     if k == 1 then
+                        instr_as_text = "@@R"..A.." = @R"..B.." << "..negative_in_parentheses(-sC)
+                     else
+                        instr_as_text = "@@R"..A.." = @R"..B.." >> "..negative_in_parentheses(sC)
+                     end
+                  elseif name == "SHLI" then
+                     -- A B sC     R(A) := sC << R(B)
+                     instr_as_text = "@@R"..A.." = "..negative_in_parentheses(sC).." << @R"..B
                   elseif name == "MOVE" then
                      -- A B     R(A) := R(B)
                      if A == B then
@@ -1316,11 +1613,61 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      else
                         instr_as_text = "@@R"..A.." = @R"..B
                      end
-                  elseif name == "JMP51" or name == "JMP" then
+                  elseif name == "LOADF" or name == "LOADI" then
+                     -- LOADF     A sBx      R(A) := (lua_Number)sBx
+                     -- LOADI     A sBx      R(A) := sBx
+                     instr_as_text = "@@R"..A.." = "..sBx..(name == "LOADF" and ".0" or "")
+                  elseif name == "TFORPREP" then
+                     -- A Bx       mark R(A+3) "to be closed";  pc+=Bx
+                     local loop_end_instr = all_instructions[pc + 1 + Bx]
+                     assert(loop_end_instr and loop_end_instr.name == "TFORCALL54" and loop_end_instr.A == A, "TFORPREP without TFORCALL")
+                     instr_as_text = "mark @R"..(A+3).." 'to-be-closed';  GOTO "..params[2]
+                  elseif name == "TFORCALL" or name == "TFORCALL54" then
+                     -- TFORCALL       A C        R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2))
+                     -- TFORCALL54     A C        R(A+4), ... ,R(A+3+C) := R(A)(R(A+1), R(A+2))
+                     assert(C > 0)
+                     local next_instr = all_instructions[pc + 1]
+                     assert(next_instr and next_instr.name == "TFORLOOP"..name:sub(9), "TFORCALL without TFORLOOP")
+                     local shift = name == "TFORCALL" and 0 or 1
+                     local vars = regs(A + 3 + shift, A + 2 + C + shift, true)
+                     loop_statement = "for "..vars.." in @R"..A..", @R"..(A+1)..", @R"..(A+2)..(name == "TFORCALL54" and ", @R"..(A+3) or "").." do"
+                     instr_as_text = vars.." = @R"..A.."(@R"..(A+1)..", @R"..(A+2)..")"
+                  elseif name == "TFORLOOP" or name == "TFORLOOP54" then
+                     -- TFORLOOP       A sBx      if R(A+1) ~= nil then { R(A)=R(A+1); pc+=sBx }
+                     -- TFORLOOP54     A Bx       if R(A+2) ~= nil then { R(A)=R(A+2); pc-=Bx }
+                     do
+                        local prev_instr = all_instructions[pc - 1]
+                        assert(prev_instr and prev_instr.name == "TFORCALL"..name:sub(9) and prev_instr.A == A-2, "TFORLOOP without TFORCALL")
+                     end
+                     local jump_offset = name == "TFORLOOP" and sBx or -Bx
+                     local loop_start_instr = assert(jump_offset < 0 and all_instructions[pc + jump_offset])
+                     do
+                        local loop_start_instr_name = loop_start_instr.name
+                        local B, C = loop_start_instr.B, loop_start_instr.C
+                        assert(
+                           (
+                              name == "TFORLOOP" and loop_start_instr_name == "JMP" and B * 512 + C - 131071
+                              or
+                              name == "TFORLOOP54" and loop_start_instr_name == "TFORPREP" and (C * 256 + B) * 2 + loop_start_instr.k
+                           ) == -2 - jump_offset, "Wrong TFORLOOP usage"
+                        )
+                     end
+                     loop_start_instr.instr_as_text = loop_start_instr.instr_as_text.." -- "..loop_statement
+                     local RA1 = "@R"..(name == "TFORLOOP" and A + 1 or A + 2)
+                     instr_as_text = "if "..RA1.." ~= nil then { @@R"..A.." = "..RA1..";  GOTO "..params[2].." } -- end of loop"
+                  elseif name == "TFORLOOP51" then
+                     -- A C     R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2)); if R(A+3) ~= nil then R(A+2)=R(A+3) else pc++
+                     assert(C > 0 and (all_instructions[pc + 1] or {}).name == "JMP51", "Wrong TFORLOOP usage")
+                     local vars = regs(A + 3, A + 2 + C, true)
+                     loop_statement = "for "..vars.." in @R"..A..", @R"..(A+1)..", @R"..(A+2).." do"
+                     instr_as_text = vars.." = @R"..A.."(@R"..(A+1)..", @R"..(A+2)..");  if @R"..(A+3).." ~= nil then @@R"..(A+2).." = @R"..(A+3).." else GOTO <"..(pc + 2)..">"
+                  elseif name == "JMP51" or name == "JMP54" or name == "JMP" then
                      -- JMP    A sBx   pc+=sBx; if (A) close all upvalues >= R(A - 1)
                      -- JMP51  sBx     pc+=sBx
+                     -- JMP54  sJ      pc+=sJ
+                     local jump_offset = name == "JMP54" and sJ or sBx
                      local close_needed = name == "JMP" and A > 0
-                     local goto_needed = sBx ~= 0
+                     local goto_needed = jump_offset ~= 0
                      instr_as_text =
                         (close_needed or goto_needed)
                         and
@@ -1329,77 +1676,103 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                            ..(goto_needed and "GOTO "..params[#params] or "")
                         or
                            "NOP"
-                     if pc == pc_after_TFORLOOP51 then
-                        instr_as_text = instr_as_text.."  -- end loop"
+                     if (all_instructions[pc - 1] or {}).name == "TFORLOOP51" then
                         local loop_start_instr = all_instructions[pc + sBx]
-                        local prev_instr = all_instructions[pc - 1]
-                        local A = prev_instr.A
-                        local C = prev_instr.C
-                        loop_start_instr.instr_as_text = loop_start_instr.instr_as_text.."   -- for "..regs(A+3, A+2+C, true).." in @R"..A..", @R"..(A+1)..", @R"..(A+2).." do"
+                        assert(sBx < 0 and loop_start_instr and loop_start_instr.name == "JMP51"
+                           and loop_start_instr.B * 512 + loop_start_instr.C - 131071 == -2 - sBx, "Wrong TFORLOOP usage")
+                        loop_start_instr.instr_as_text = loop_start_instr.instr_as_text.." -- "..loop_statement
+                        instr_as_text = instr_as_text.." -- end of loop"
                      end
-                  elseif name == "TFORCALL" then
-                     -- A C     R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2))
-                     assert(C > 0)
-                     assert(all_instructions[pc + 1].name == "TFORLOOP")
-                     instr_as_text = regs(A+3, A+2+C, true).." = @R"..A.."(@R"..(A+1)..", @R"..(A+2)..")"
-                  elseif name == "TFORLOOP" then
-                     -- A sBx   if R(A+1) ~= nil then { R(A)=R(A+1); pc += sBx }
-                     instr_as_text = "if @R"..(A+1).." ~= nil then { @@R"..A.." = @R"..(A+1)..";  GOTO "..params[2].." }  -- end loop"
-                     do
-                        local loop_start_instr = all_instructions[pc + sBx]
-                        local prev_instr = all_instructions[pc - 1]
-                        assert(prev_instr.name == "TFORCALL")
-                        local A = A - 2
-                        assert(A == prev_instr.A)
-                        local C = prev_instr.C
-                        loop_start_instr.instr_as_text = loop_start_instr.instr_as_text.."   -- for "..regs(A+3, A+2+C, true).." in @R"..A..", @R"..(A+1)..", @R"..(A+2).." do"
-                     end
-                  elseif name == "TFORLOOP51" then
-                     -- A C     R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2)); if R(A+3) ~= nil then R(A+2)=R(A+3) else pc++
-                     assert(C > 0)
-                     assert(all_instructions[pc + 1].name == "JMP51")
-                     instr_as_text = regs(A+3, A+2+C, true).." = @R"..A.."(@R"..(A+1)..", @R"..(A+2)..");  if @R"..(A+3).." ~= nil then @@R"..(A+2).." = @R"..(A+3).." else GOTO <"..(pc + 2)..">"
-                     pc_after_TFORLOOP51 = pc + 1
                   elseif name == "LOADNIL" or name == "LOADNIL51" then
                      -- LOADNIL    A B     R(A), R(A+1), ..., R(A+B) := nil
                      -- LOADNIL51  A B     R(A) := ... := R(B) := nil
                      instr_as_text = regs(A, name == "LOADNIL" and A + B or B, true).." = nil"
                   elseif name == "SELF" then
-                     -- A B C   R(A+1) := R(B); R(A) := R(B)[RK(C)]
-                     instr_as_text = "@@R"..(A+1).." = @R"..B..";  @@R"..A.." = @R"..B.."["..params[3].."]   -- prepare for @R"..B..":method()"
-                  elseif name == "FORLOOP" then
-                     -- A sBx   R(A)+=R(A+2); if R(A) <?= R(A+1) then { pc+=sBx; R(A+3)=R(A) }
-                     instr_as_text = "@@R"..A.." += @R"..(A+2)..";  if @R"..A.." <?= @R"..(A+1).." then { @@R"..(A+3).." = @R"..A..";  GOTO "..params[2].." }  -- end loop"
-                  elseif name == "FORPREP" then
-                     -- A sBx   R(A)-=R(A+2); pc+=sBx
-                     instr_as_text = "@@R"..A.." -= @R"..(A+2)..";  GOTO "..params[2].."  -- for @@R"..(A+3).." = @R"..A..", @R"..(A+1)..", @R"..(A+2).." do"
-                  elseif name == "TESTSET" then
-                     -- A B C   if (R(B) <=> C) then R(A) := R(B) else pc++
-                     assert(C < 2)
-                     instr_as_text = "if "..(C == 0 and "not " or "").."@R"..B.." then @@R"..A.." = @R"..B.." else GOTO <"..(pc + 2)..">"
-                  elseif name == "TEST" then
-                     -- A C     if not (R(A) <=> C) then pc++
-                     assert(C < 2)
-                     instr_as_text = "if "..(C > 0 and "not " or "").."@R"..A.." then GOTO <"..(pc + 2)..">"
-                  elseif name == "LE" or name == "LT" then
+                     -- A B C   R(A+1) := R(B); R(A) := R(B)[RK(C):identifier]
+                     assert(C > 255 or k == 1, "SELF with not-a-constant as method name")
+                     local const = all_consts[C + (k or 0) * 256 - 255]
+                     assert(const and const.type == "string" and is_correct_identifier(const.value, Lua_version), "SELF with invalid method name")
+                     instr_as_text = "@@R"..(A+1).." = @R"..B..";  @@R"..A.." = @R"..B.."["..params[3].."]   -- prepare for @R"..B..":"..const.value.."()"
+                  elseif group == "8" then
+                     -- FORPREP      A sBx      R(A)-=R(A+2); pc+=sBx
+                     -- FORPREP54    A Bx       if R(A) >? R(A+1) then pc+=Bx+1 else R(A+3) := R(A)
+                     local jump_offset = name == "FORPREP" and sBx or Bx
+                     assert(jump_offset >= 0 and (all_instructions[pc + 1 + jump_offset] or {}).name == "FORLOOP"..name:sub(8), "FORPREP without FORLOOP")
+                     local param_2 = params[2]
+                     if name == "FORPREP" then
+                        instr_as_text = "@@R"..A.." -= @R"..(A+2)..";  GOTO "..param_2
+                     else
+                        param_2 = param_2:gsub("%d+", function(n) return tostring(1 + tonumber(n)) end)
+                        instr_as_text = "if @R"..A.." >? @R"..(A+1).." then GOTO "..param_2.." else @@R"..(A+3).." = @R"..A
+                     end
+                     instr_as_text = instr_as_text.." -- for @@R"..(A+3).." = @R"..A..", @R"..(A+1)..", @R"..(A+2).." do"
+                  elseif group == "9" then
+                     -- FORLOOP      A sBx      R(A)+=R(A+2); if R(A) <?= R(A+1) then { R(A+3)=R(A); pc+=sBx }
+                     -- FORLOOP54    A Bx       R(A)+=R(A+2); if R(A) <?= R(A+1) then { R(A+3)=R(A); pc-=Bx  }
+                     local jump_offset = name == "FORLOOP" and sBx or -Bx
+                     local instr = all_instructions[pc + jump_offset]
+                     assert(jump_offset < 0 and instr and instr.name == "FORPREP"..name:sub(8)
+                        and (name == "FORLOOP" and instr.B * 512 + instr.C - 131071 or (instr.C * 256 + instr.B) * 2 + instr.k) == -1 - jump_offset,
+                        "FORLOOP without FORPREP")
+                     instr_as_text = "@@R"..A.." += @R"..(A+2)..";  if @R"..A.." <?= @R"..(A+1).." then { @@R"..(A+3).." = @R"..A..";  GOTO "..params[2].." } -- end of loop"
+                  elseif name == "TESTSET" or name == "TESTSET54" then
+                     -- TESTSET    A B C      if (R(B) <=> C) then R(A) := R(B) else pc++
+                     -- TESTSET54  A B k      if (not R(B) == k) then pc++ else R(A) := R(B)
+                     local cond = name == "TESTSET" and C or k
+                     assert(cond < 2 and all_instructions[pc + 1].name:sub(1, 3) == "JMP")
+                     instr_as_text = "if "..(cond > 0 and "" or "not ").."@R"..B.." then @@R"..A.." = @R"..B.." else GOTO <"..(pc + 2)..">"
+                  elseif name == "TEST" or name == "TEST54" then
+                     -- TEST    A C        if not (R(A) <=> C) then pc++
+                     -- TEST54  A k        if (not R(A) == k) then pc++
+                     local cond = name == "TEST" and C or k
+                     assert(cond < 2 and all_instructions[pc + 1].name:sub(1, 3) == "JMP")
+                     instr_as_text = "if "..(cond > 0 and "not " or "").."@R"..A.." then GOTO <"..(pc + 2)..">"
+                  elseif group == "=" then
+                     -- EQ   A B C   if ((RK(B) == RK(C)) ~= A) then pc++
                      -- LE   A B C   if ((RK(B) <= RK(C)) ~= A) then pc++
                      -- LT   A B C   if ((RK(B) <  RK(C)) ~= A) then pc++
-                     assert(A < 2)
-                     local operation = ({LE = " <= ", LT = " < "})[name]
+                     assert(A < 2 and all_instructions[pc + 1].name:sub(1, 3) == "JMP")
+                     local operation = assert(({LE = " <= ", LT = " < ", EQ = " == "})[name])
                      local left, right = params[2], params[3]
                      if B > 255 and C <= 255 then
                         left, right = right, left
                         operation = operation:gsub(".", {[">"] = "<", ["<"] = ">"})
                      end
-                     instr_as_text = "if "..(A > 0 and "not (" or "")..left..operation..right..(A > 0 and ")" or "").." then GOTO <"..(pc + 2)..">"
-                  elseif name == "EQ" then
-                     -- A B C   if ((RK(B) == RK(C)) ~= A) then pc++
-                     assert(A < 2)
-                     local left, right = params[2], params[3]
-                     if B > 255 and C <= 255 then
-                        left, right = right, left
+                     local opn, cls = "", ""
+                     if A > 0 then
+                        if name == "EQ" then
+                           operation = " ~= "
+                        else
+                           opn, cls = "not (", ")"
                      end
-                     instr_as_text = "if "..left..(A == 0 and " == " or " ~= ")..right.." then GOTO <"..(pc + 2)..">"
+                     end
+                     instr_as_text = "if "..opn..left..operation..right..cls.." then GOTO <"..(pc + 2)..">"
+                  elseif group == "<" then
+                     -- EQ54     A B k      if ((R(A) == R(B)) ~= k) then pc++
+                     -- EQI      A sB C k   if ((R(A) == sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+                     -- EQK      A B k      if ((R(A) == K(B)) ~= k) then pc++
+                     -- LE54     A B k      if ((R(A) <= R(B)) ~= k) then pc++
+                     -- LEI      A sB C k   if ((R(A) <= sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+                     -- GEI      A sB C k   if ((R(A) >= sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+                     -- LT54     A B k      if ((R(A) <  R(B)) ~= k) then pc++
+                     -- LTI      A sB C k   if ((R(A) <  sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+                     -- GTI      A sB C k   if ((R(A) >  sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
+                     assert(all_instructions[pc + 1].name == "JMP54")
+                     local name2 = name:sub(1, 2)
+                     local operation = assert(({LE = " <= ", GE = " >= ", LT = " < ", GT = " > ", EQ = " == "})[name2])
+                     local opn, cls = "", ""
+                     if k > 0 then
+                        if name2 == "EQ" then
+                           operation = " ~= "
+                        else
+                           opn, cls = "not (", ")"
+                        end
+                     end
+                     local param_2 = params[2]
+                     if params[3] == 1 then   -- C==1 means sB is float
+                        param_2 = param_2:gsub("%d+", "%0.0")
+                     end
+                     instr_as_text = "if "..opn.."@R"..A..operation..param_2..cls.." then GOTO <"..(pc + 2)..">"
                   elseif name == "NEWTABLE" then
                      instr_as_text = "@@R"..A.." = {}  arr:"..reserved_size_as_string(B)..", hash:"..reserved_size_as_string(C)
                   elseif name == "SETLIST" then
@@ -1413,41 +1786,92 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      -- B = 0    R(A)[((C-1)*50+1)..] = R((A+1)..)
                      -- B > 0    R(A)[((C-1)*50+1)..((C-1)*50+B)] = R((A+1)..(A+B))
                      local from_idx = (C-1)*50+1
-                     instr_as_text = "@R"..A.."["..from_idx.."]"..(
+                     instr_as_text = "@@R"..A.."["..from_idx.."]"..(
                         B == 0 and ",.."
                         or B == 1 and ""
-                        or B == 2 and ", @R"..A.."["..(from_idx + 1).."]"
-                        or B == 3 and ", @R"..A.."["..(from_idx + 1).."]"..", @R"..A.."["..(from_idx + 2).."]"
-                        or ",..,@R"..A.."["..(from_idx + B - 1).."]"
+                        or B == 2 and ", @@R"..A.."["..(from_idx + 1).."]"
+                        or B == 3 and ", @@R"..A.."["..(from_idx + 1).."]"..", @@R"..A.."["..(from_idx + 2).."]"
+                        or ",..,@@R"..A.."["..(from_idx + B - 1).."]"
                      ).." = "..regs(A+1, B>0 and A+B)
-                  elseif name == "CONCAT" then
+                  elseif name == "CONCAT" or name == "CONCAT54" then
+                     -- CONCAT    A B C   R(A) := R(B).. ... ..R(C)
+                     -- CONCAT54  A B     R(A) := R(A).. ... ..R(A + B - 1)
+                     local from, to = B, C
+                     if name == "CONCAT54" then
+                        from, to = A, A + B - 1
+                     end
+                     assert(to > from)
                      local t = {}
-                     for j = B, C do
-                        t[#t + 1] = "@R"..j
+                     for j = from, to do
+                        table.insert(t, "@R"..j)
                      end
                      instr_as_text = "@@R"..A.." = "..table.concat(t, "..")
                   elseif name == "CALL" then
                      --  A B C   R(A), ... ,R(A+C-2) := R(A)(R(A+1), ... ,R(A+B-1))
                      --     (*)  If (B == 0) then B = top.
                      --          If (C == 0) then 'top' is set to last_result+1, so next open instruction (CALL, RETURN, SETLIST) may use 'top'.
-                     instr_as_text = (C == 1 and "" or regs(A, C>0 and A+C-2, true).." = ").."@R"..A.."("..(B == 1 and "" or regs(A+1, B>0 and A+B-1))..")"
-                  elseif name == "TAILCALL" then
-                     --@  A B     return R(A)(R(A+1), ... ,R(A+B-1))
+                     instr_as_text =
+                        (C == 1 and "" or regs(A, C > 0 and A + C - 2, true).." = ")
+                        .."@R"..A.."("..(B == 1 and "" or regs(A + 1, B > 0 and A + B - 1))..")"
+                  elseif name == "TAILCALL" or name == "TAILCALL54" then
+                     -- TAILCALL      A B        return R(A)(R(A+1), ... ,R(A+B-1))
+                     -- TAILCALL54    A B C k    return R(A)(R(A+1), ... ,R(A+B-1))
+                     if name == "TAILCALL54" then
+                        -- (*) In instructions OP_RETURN/OP_TAILCALL, 'k' specifies that the
+                        -- function either builds upvalues, which may need to be closed, or is
+                        -- vararg, which must be corrected before returning. When 'k' is true,
+                        -- C > 0 means the function is vararg and (C - 1) is its number of
+                        -- fixed parameters.
+                        if k > 0 then
+                           assert(C == (is_vararg and parameters_qty + 1 or 0), "Wrong parameter C in TAILCALL")
+                        else
+                           assert(not is_vararg, "TAILCALL with k=0 inside vararg function")
+                        end
+                     end
                      instr_as_text = "RETURN @R"..A.."("..(B == 1 and "" or regs(A+1, B>0 and A+B-1))..")"
-                  elseif name == "RETURN" then
-                     --@  A B     return R(A), ... ,R(A+B-2)
+                  elseif name == "RETURN" or name == "RETURN54" then
+                     -- RETURN      A B        return R(A), ... ,R(A+B-2)
+                     -- RETURN54    A B C k    return R(A), ... ,R(A+B-2)    k и C используются только для проверок
                      --    (*) If (B == 0) then return up to 'top'.
+                     if name == "RETURN54" then
+                        if k > 0 then
+                           assert(C == (is_vararg and parameters_qty + 1 or 0), "Wrong parameter C in RETURN")
+                        else
+                           assert(not is_vararg, "RETURN with k=0 inside vararg function")
+                        end
+                     end
                      instr_as_text = "RETURN"..(B == 1 and "" or " "..regs(A, B>0 and A+B-2))
-                  elseif name == "VARARG" then
-                     --@  A B     R(A), R(A+1), ..., R(A+B-2) = vararg
-                     --   (*) If (B == 0) then use actual number of varargs and set top (like in CALL with C == 0).
-                     instr_as_text = B == 1 and "NOP" or (regs(A, B>0 and A+B-2, true).." = ...")
+                  elseif name == "RETURN0" or name == "RETURN1" then
+                     -- RETURN0                return
+                     -- RETURN1     A          return R(A)
+                     assert(not is_vararg, name.." inside vararg function")
+                     instr_as_text = "RETURN"..(name == "RETURN1" and " @R"..A or "")
+                  elseif name == "VARARG" or name == "VARARG54" then
+                     -- VARARG    A B        R(A), R(A+1), ..., R(A+B-2) = vararg
+                     -- VARARG54  A C        R(A), R(A+1), ..., R(A+C-2) = vararg
+                     --   (*) If (B/C == 0) then use actual number of varargs and set top (like in CALL with C == 0).
+                     local n = (name == "VARARG54" and C or B) - 1
+                     instr_as_text = n == 0 and "NOP" or (regs(A, n > 0 and A + (n-1), true).." = ...")
                   elseif name == "LOADBOOL" then
                      --@  A B C   R(A) := (Bool)B; if (C) pc++
                      assert(B < 2 and C < 2)
+                     if C > 0 then
+                        local next_instr = all_instructions[pc + 1]
+                        assert(next_instr.name == name and next_instr.A == A and next_instr.B + B == 1 and next_instr.C == 0)
+                     end
                      instr_as_text = "@@R"..A.." = "..tostring(B > 0)..(C > 0 and ";  GOTO <"..(pc + 2)..">" or "")
                   else
                      error("There is no disassembly code for instruction "..name)
+                  end
+                  -- process global var names
+                  if (const_with_global_var_name or 0) > 0 then
+                     local const = all_consts[const_with_global_var_name]
+                     if const.type == "string" then
+                        local name = const.value   -- this is either name of some global var or string key of some upvalue table
+                        if name:match"^V%d%d%d+$" then
+                           is_global_var_name[name] = true  -- don't use this name as local variable name or upvalue name
+                        end
+                     end
                   end
                   if locals_qty > 0 and instr_writes_to ~= "-" then
                      -- searching for pc of initialization for every local variable
@@ -1462,24 +1886,33 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                         elseif name == "LOADNIL51" then
                            -- LOADNIL51  -- A B     R(A) := ... := R(B) := nil
                            regs_to = B
-                        elseif name == "CALL" then
-                           -- CALL       -- A B C   R(A), ... ,R(A+C-2) := R(A)(R(A+1), ... ,R(A+B-1))
-                           regs_to = math.huge
                         elseif name == "VARARG" then
                            -- VARARG     -- A B     R(A), R(A+1), ..., R(A+B-2) = vararg
                            regs_to = A + B - 2
-                        elseif name == "FORPREP" then
-                           -- FORPREP    -- A sBx   R(A)-=R(A+2); pc+=sBx
+                        elseif name == "VARARG54" or name == "CALL" then
+                           -- VARARG     -- A C     R(A), R(A+1), ..., R(A+C-2) = vararg
+                           -- CALL       -- A B C   R(A), ... ,R(A+C-2) := R(A)(R(A+1), ... ,R(A+B-1))
+                           regs_to = A + C - 2
+                        elseif name == "FORPREP" or name == "FORPREP54" then
+                           -- FORPREP      A sBx      R(A)-=R(A+2); pc+=sBx
+                           -- FORPREP54    A Bx       if R(A) >? R(A+1) then pc+=Bx+1 else R(A+3) := R(A)
                            -- (loop body)
-                           -- FORLOOP    -- A sBx   R(A)+=R(A+2); if R(A) <?= R(A+1) then { pc+=sBx; R(A+3)=R(A) }
+                           -- FORLOOP      A sBx      R(A)+=R(A+2); if R(A) <?= R(A+1) then { R(A+3)=R(A); pc+=sBx }
+                           -- FORLOOP54    A Bx       R(A)+=R(A+2); if R(A) <?= R(A+1) then { R(A+3)=R(A); pc-=Bx  }
                            regs_from = A + 3
                            regs_to = regs_from
                         elseif name == "TFORLOOP" then
                            -- JMP
                            -- (loop body)
-                           -- TFORCALL   -- A C     R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2));
-                           -- TFORLOOP   -- A sBx   if R(A+1) ~= nil then { R(A)=R(A+1); pc += sBx }
+                           -- TFORCALL     A C     R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2))
+                           -- TFORLOOP     A sBx   if R(A+1) ~= nil then { R(A)=R(A+1); pc += sBx }
                            assignment_pc, regs_from, regs_to = pc + sBx, A + 1, A + all_instructions[pc - 1].C
+                        elseif name == "TFORLOOP54" then
+                           -- TFORPREP     A Bx       mark R(A+3) "to be closed";  pc+=Bx
+                           -- (loop body)
+                           -- TFORCALL54   A C        R(A+4), ... ,R(A+3+C) := R(A)(R(A+1), R(A+2))
+                           -- TFORLOOP54   A Bx       if R(A+2) ~= nil then { R(A)=R(A+2); pc-=Bx }
+                           assignment_pc, regs_from, regs_to = pc - Bx, A + 2, A + 1 + all_instructions[pc - 1].C
                         elseif name == "TFORLOOP51" then
                            -- JMP
                            -- (loop body)
@@ -1515,9 +1948,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                end
             end
          else
-            instr_as_luac = instr.opcode.." "..A.." "..B.." "..C
+            instr_as_luac = instr.opcode.." "..A.." "..B.." "..C..(k and " "..k or "")
             if is_really_an_instruction then
-               instr_as_text = "UNRECOGNIZED opcode="..instr.opcode..", A="..A..", B="..B..", C="..C
+               instr_as_text = "UNRECOGNIZED opcode="..instr.opcode..", A="..A..", B="..B..", C="..C..(k and ", k="..k or "")
             end
          end
          if not is_reachable then
