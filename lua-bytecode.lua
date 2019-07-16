@@ -3,7 +3,7 @@
 -- PUC Lua (5.1, 5.2, 5.3, 5.4.0-alpha) bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-07-05
+-- Version: 2019-07-16
 
 
 -- must have "double" Lua numbers
@@ -171,7 +171,7 @@ do
                if N >= two_wl then
                   break
                elseif (is_float32 and round_float64_to_float32(test_value) or test_value) == positive_float then
-                  -- Fraction found:  N/D * 2^k   where N,D < 2^20 (2^9 for float32)
+                  -- Fraction found:  N/D * 2^k   where N,D < 2^20    (2^9 for float32)
                   local max_degree_float = is_float32 and 127 or 1023
                   local min_degree_float = is_float32 and -149 or -1074
                   while k > 0 and D % 2.0 == 0 do
@@ -188,7 +188,7 @@ do
                      repeat
                         frac = fraction_to_string(N, D, k, min_degree_float, max_degree_float) or frac
                         k, N, D = k + dk, N / fN, D / fD
-                     until N % fN + D % fD ~= 0
+                     until N % 1 + D % 1 ~= 0
                   end
                   shortest = get_shortest_string(shortest, frac)
                   break
