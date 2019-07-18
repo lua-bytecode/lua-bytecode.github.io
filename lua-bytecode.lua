@@ -3,7 +3,7 @@
 -- PUC Lua (5.1, 5.2, 5.3, 5.4.0-alpha) bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-07-16
+-- Version: 2019-07-18
 
 
 -- must have "double" Lua numbers
@@ -803,7 +803,21 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
    end
 
-   assert(read_block(4, true) == "\27Lua", "Wrong bytecode signature.  Only PUC Lua bytecodes are supported.")
+   local first_3_bytes = read_block(3, true)
+   -- Did you know that Lua 5.2+ bytecode file could have optional UTF-8 BOM?  :-)
+   if first_3_bytes == '\239\187\191' then
+      -- skip UTF-8 BOM
+      first_3_bytes = read_block(3, true)
+   end
+   if first_3_bytes:sub(1, 1) == "#" then
+      -- skip comment/shebang
+      repeat
+         local newline_pos = first_3_bytes:find"\n"
+         first_3_bytes = (first_3_bytes..read_block(newline_pos or 3, true)):sub(-3)
+      until newline_pos
+   end
+   assert(first_3_bytes == "\27Lu" and read_block(1, true) == "a", "Wrong bytecode signature.  Only PUC Lua bytecodes are supported.")
+
    do
       -- [u8 version] Version number (0x52 for Lua 5.2, etc)
       Lua_version = read_byte(true)
@@ -1235,11 +1249,11 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             error("Unknown constant type = "..const_type_id)
          end
          local location_in_file = ("+%04X:Size=%X:"):format(file_offset, #data_in_file)
-         for j = 1, math.min(9, #data_in_file) do
+         for j = 1, math.min(10, #data_in_file) do
             location_in_file = location_in_file..(" %02X"):format(data_in_file:byte(j))
          end
-         local target_length = #"+FFFF:Size=9: 01 02 03 04 05 06 07 08 09"
-         if #data_in_file > 9 or #location_in_file > target_length then
+         local target_length = #"+FFFF:Size=A: 01 02 03 04 05 06 07 08 09 0A"
+         if #data_in_file > 10 or #location_in_file > target_length then
             location_in_file = location_in_file:sub(1, target_length - 3).."..."
          end
          location_in_file = location_in_file..(" "):rep(target_length - #location_in_file)
@@ -2083,7 +2097,7 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
    Print(indent.."Upvalues: "..proto_object.upv_qty)
    for j = 1, proto_object.upv_qty do
       local upv = proto_object.all_upvalues[j]
-      Print(indent.."  "..rpad("Upv#"..j.." is parent function's "..(upv.in_locals and "R"..upv.index or "Upv#"..upv.index), 42)
+      Print(indent.."  "..rpad("Upv#"..j.." is parent function's "..(upv.in_locals and "R"..upv.index or "Upv#"..upv.index), 45)
          ..(upv.var_name and " name: "..upv.var_name or "")
       )
    end
@@ -2093,7 +2107,7 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
          local loc = proto_object.all_locals[j]
          Print(indent.."  "..rpad("Local#"..j, 9).." R"..rpad(loc.reg_no, 3).." "
             ..rpad(j < proto_object.parameters_qty + (proto_object.has_local_arg and 2 or 1) and "parameter" or "def:<"..(loc.def_pc == 0 and "" or loc.def_pc)..">", 10)
-            .." scope:<"..rpad((loc.start_pc > loc.end_pc and "" or loc.start_pc..(loc.start_pc == loc.end_pc and "" or ".."..loc.end_pc))..">", 9)
+            .." scope:<"..rpad((loc.start_pc > loc.end_pc and "" or loc.start_pc..(loc.start_pc == loc.end_pc and "" or ".."..loc.end_pc))..">", 12)
             .." name: "..loc.var_name
          )
       end
