@@ -3,13 +3,15 @@
 -- PUC Lua (5.1, 5.2, 5.3, 5.4.0-alpha) bytecode viewer and converter
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-07-18
+-- Version: 2019-07-20
 
 
 -- must have "double" Lua numbers
 do
    local x = 2^53
-   assert(x - (x-1) == 1 and (x+1) - x ~= 1, "Floating point numbers must be 'double'")
+   if x - (x-1) ~= 1 or (x+1) - x == 1 then
+      error"Floating point numbers must be 'double'"
+   end
 end
 
 local function round_float64_to_float32(x)
@@ -81,10 +83,12 @@ do
          return "0/0"
       end
       local float_number = the_number * 1.0
-      assert(float_number == the_number)
+      if float_number ~= the_number then
+         error("serialize_float_value() with non-float argument: "..tostring(the_number))
+      end
       local is_float32 = bytes_per_float == 4
-      if is_float32 then
-         assert(float_number == round_float64_to_float32(float_number))
+      if is_float32 and float_number ~= round_float64_to_float32(float_number) then
+         error""
       end
       if float_number == 0 then
          -- zero
@@ -98,9 +102,15 @@ do
          -- convert the number to string and split the string into mantissa and exponent
          local mant_int, mant_frac, exponent = ("%.17e"):format(positive_float):match"^(%d)%D+(%d+)e([-+]%d+)$"
          local mantissa, trailing_zeroes = (mant_int..mant_frac):match"^([^0].-)(0*)$"
-         exponent = assert(tonumber(exponent)) + #trailing_zeroes - #mant_frac
-         local test_value = assert(tonumber(mantissa.."e"..exponent))
-         assert((is_float32 and round_float64_to_float32(test_value) or test_value) == positive_float)
+         exponent = tonumber(exponent)
+         if not exponent then
+            error""
+         end
+         exponent = exponent + #trailing_zeroes - #mant_frac
+         local test_value = tonumber(mantissa.."e"..exponent)
+         if not test_value or (is_float32 and round_float64_to_float32(test_value) or test_value) ~= positive_float then
+            error""
+         end
          -- remove last digits while float value is not affected (example: 0.10000000000000001 -> 0.1)
          repeat
             local truncated_mantissa, incr = mantissa:match"^(.*)(.)$"
@@ -198,8 +208,15 @@ do
          end
       end
       shortest = sign..shortest
-      local float64_value = assert((loadstring or load)("return "..shortest))()
-      assert((is_float32 and round_float64_to_float32(float64_value) or float64_value) == float_number)
+
+      local func = (loadstring or load)("return "..shortest)
+      if not func then
+         error""
+      end
+      local float64_value = func()
+      if (is_float32 and round_float64_to_float32(float64_value) or float64_value) ~= float_number then
+         error""
+      end
       return shortest, is_float32 and float64_value
    end
 
@@ -389,7 +406,9 @@ local function make_arg(B, B_mode, is_really_an_instruction, k)
       B = B + (k or 0) * 256
    end
    if B_mode == "K" and B < 256 or B_mode == "R" then
-      assert(not is_really_an_instruction or B < 256, "Must be a register")
+      if is_really_an_instruction and B >= 256 then
+         error"Must be a register"
+      end
       return "@R"..B, B
    elseif B_mode == "K" or B_mode == "k" then
       B = B % 256 + 1
@@ -398,7 +417,9 @@ local function make_arg(B, B_mode, is_really_an_instruction, k)
       B = B - 127
       return negative_in_parentheses(B), B
    else
-      assert(B_mode == "U")
+      if B_mode ~= "U" then
+         error""
+      end
       return B, B
    end
 end
@@ -442,14 +463,18 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          bytecode_as_string_or_loader
 
    local function write_block(str)
-      assert(convert_to_enbi)
+      if not convert_to_enbi then
+         error""
+      end
       table.insert(target_bytecode, str)
    end
 
    local function read_block(len, mirror_to_target_bytecode)
       local file_offset = bc_pos - 1
       local block = block_reader(len) or ""
-      assert(#block == len, "Unexpected end of bytecode")
+      if #block ~= len then
+         error"Unexpected end of bytecode"
+      end
       bc_pos = bc_pos + math.floor(len)
       if mirror_to_target_bytecode and convert_to_enbi then
          write_block(block)
@@ -489,7 +514,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       -- [u8 value]
       local data_in_file, file_offset = read_block(1, mirror_to_target_bytecode)
       local b = data_in_file:byte()
-      assert(b < 2, "Wrong boolean value")
+      if b >= 2 then
+         error"Wrong boolean value"
+      end
       return b > 0, file_offset, data_in_file
    end
 
@@ -506,7 +533,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    end
 
    local function write_double_as_unsigned_int(bytes_in_this_unsigned_int, value)
-      assert(bytes_in_this_unsigned_int > 0)
+      if bytes_in_this_unsigned_int <= 0 then
+         error""
+      end
       local s = ""
       for j = 1, bytes_in_this_unsigned_int do
          local low_byte = value % 256.0
@@ -521,9 +550,13 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       if first_byte or Lua_version > 0x53 then
          local value = 0
          first_byte = first_byte or read_byte(true)
-         assert(first_byte > 0, "Overlong integer")
+         if first_byte == 0 then
+            error"Overlong integer"
+         end
          repeat
-            assert(value < 2^24, "Integer is beyond int32 range")  -- Lua integer under Fengari is 32-bit
+            if value >= 2^24 then
+               error"Integer is beyond int32 range"  -- Lua integer under Fengari is 32-bit
+            end
             local b = first_byte or read_byte(true)
             value, first_byte = value * 128 + b
          until b >= 128
@@ -557,15 +590,17 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       end
       if len_with_term_zero > 0 then
          local str, file_offset = read_block(len_with_term_zero - 1, true)
-         if old_style then
-            assert(read_byte(true) == 0, "Wrong string terminator")
+         if old_style and read_byte(true) ~= 0 then
+            error"Wrong string terminator"
          end
          return str, file_offset
       end
    end
 
    local function double_to_int64_wo_mt(x)
-      assert(x % 1.0 == 0.0 and x >= -2^63 and x < 2^63, "Can't convert this float to int64: "..("%.17g"):format(x))
+      if x % 1.0 ~= 0.0 or x < -2^63 or x >= 2^63 then
+         error("Can't convert this float to int64: "..("%.17g"):format(x))
+      end
       local low = x % 2^32
       local high = (x - low) / 2^32
       return {high, low}
@@ -577,7 +612,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       if convert_to_enbi.bytes_per_lua_int == 8 then
          return double_to_int64_wo_mt(x)
       else
-         assert(x % 1.0 == 0.0 and x >= -2^31 and x < 2^31, "Can't convert this float to int32: "..("%.17g"):format(x))
+         if x % 1.0 ~= 0.0 or x < -2^31 or x >= 2^31 then
+            error("Can't convert this float to int32: "..("%.17g"):format(x))
+         end
          return {x * 1.0}
       end
    end
@@ -599,7 +636,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          return double_to_int64_wo_mt(lua_int_as_array[1])
       else
          local x = convert_lua_int_to_double(lua_int_as_array)
-         assert(x >= -2^31 and x < 2^31, "Can't convert this int64 to int32: "..tostring(lua_int_as_array))
+         if x < -2^31 or x >= 2^31 then
+            error("Can't convert this int64 to int32: "..tostring(lua_int_as_array))
+         end
          return {x}
       end
    end
@@ -627,7 +666,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          -- 32-bit lua integers are stored as array of one float value  {[1]=signed_val32 (-2^31..2^31-1)}
          -- 64-bit lua integers are stored as array of two float values {[1]=signed_high32(-2^31..2^31-1), [2]=unsigned_low32(0..2^32-1)}
          buffer, bits_in_buffer, str_in_LE_order = 0.0, 0, ""
-         assert(4 * #value_as_array == convert_to_enbi.bytes_per_lua_int)
+         if 4 * #value_as_array ~= convert_to_enbi.bytes_per_lua_int then
+            error""
+         end
          for j = #value_as_array, 1, -1 do
             write_field(32, value_as_array[j])
          end
@@ -656,16 +697,18 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                while value < 2^exp do
                   exp = exp - 1
                end
-               assert(value == 0 or exp <= base_exp and exp >= low_exp - significand_bits)
+               if value ~= 0 and (exp > base_exp or exp < low_exp - significand_bits) then
+                  error""
+               end
                if exp < low_exp then
                   exp, high_bit = low_exp, 0.0
                end
                exp_field = (exp + base_exp) * high_bit
-               assert(exp_field >= 0 and exp_field < max_exp_field)
                value = value / 2^exp - high_bit
-               assert(value >= 0.0 and value < 1.0)
                significand = value * 2^significand_bits
-               assert(significand % 1.0 == 0.0)
+               if exp_field < 0 or exp_field >= max_exp_field or value < 0.0 or value >= 1.0 or significand % 1.0 ~= 0.0 then
+                  error""
+               end
             end
          end
          write_field(significand_bits, significand)
@@ -816,26 +859,38 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          first_3_bytes = (first_3_bytes..read_block(newline_pos or 3, true)):sub(-3)
       until newline_pos
    end
-   assert(first_3_bytes == "\27Lu" and read_block(1, true) == "a", "Wrong bytecode signature.  Only PUC Lua bytecodes are supported.")
+
+   if not (first_3_bytes == "\27Lu" and read_block(1, true) == "a") then
+      error"Wrong bytecode signature.  Only PUC Lua bytecodes are supported."
+   end
 
    do
       -- [u8 version] Version number (0x52 for Lua 5.2, etc)
       Lua_version = read_byte(true)
-      assert(Lua_version ~= 0x54, "Lua versions 5.4.0 work/work2 (published prior to 5.4.0 alpha) are not supported")
+      if Lua_version == 0x54 then
+         error"Lua versions 5.4.0 work/work2 (published prior to 5.4.0 alpha) are not supported"
+      end
       local version_factor = 16
       if not (Lua_version >= 0x10 and Lua_version <= 0x53) then
          Lua_version = read_int(Lua_version)
-         assert(Lua_version >= 504 and Lua_version < 2048, "Invalid Lua version specified in bytecode header")  -- first byte should be less than 0x10, hence no collisions up to Lua 20.47
+         -- first byte should be less than 0x10, hence no collisions up to Lua 20.47
+         if Lua_version < 504 or Lua_version >= 2048 then
+            error"Invalid Lua version specified in bytecode header"
+         end
          version_factor = 100
       end
       local major_version = math.floor(Lua_version / version_factor)
       local minor_version = Lua_version % version_factor
       Lua_version = major_version * 16 + minor_version
       Lua_version_as_string = major_version.."."..minor_version
-      assert(minor_version < 16 and major_version < 16 and Lua_version >= 0x51 and Lua_version <= 0x54, "Lua version "..Lua_version_as_string.." is not supported")
+      if minor_version >= 16 or major_version >= 16 or Lua_version < 0x51 or Lua_version > 0x54 then
+         error("Lua version "..Lua_version_as_string.." is not supported")
+      end
    end
    -- [u8 impl] Implementation (0 = the bytecode is compatible with the "official" PUC-Rio implementation)
-   assert(read_byte(true) == 0, "Bytecode is incompatible with PUC-Rio implementation")
+   if read_byte(true) ~= 0 then
+      error"Bytecode is incompatible with PUC-Rio implementation"
+   end
 
    if convert_to_enbi then
       local version_subset = math.max(Lua_version, 0x52)
@@ -845,12 +900,16 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          [0x54] = "^([LB])([48])([48])$",
       })[version_subset]
       local e, c_int, c_ptr, lua_int, lua_float = convert_to_enbi:upper():match(enbi_pattern)
-      assert(e, "ERROR: Wrong target EnBi string: "..convert_to_enbi.."\nLua "..Lua_version_as_string.." bytecode's EnBi must match the following regex: "..enbi_pattern:gsub("[()]", ""))
+      if not e then
+         error("ERROR: Wrong target EnBi string: "..convert_to_enbi.."\nLua "..Lua_version_as_string.." bytecode's EnBi must match the following regex: "..enbi_pattern:gsub("[()]", ""))
+      end
       lua_int, lua_float, c_int, c_ptr = tonumber(lua_int), tonumber(lua_float), tonumber(c_int), tonumber(c_ptr)
       if version_subset == 0x52 then
          lua_int   = lua_int   ~= 0 and lua_int   or nil
          lua_float = lua_float ~= 0 and lua_float or nil
-         assert(not lua_int ~= not lua_float, "ERROR: Wrong target EnBi string: "..convert_to_enbi.."\nLua "..Lua_version_as_string.." bytecode's EnBi must contain exactly one zero")
+         if not lua_int == not lua_float then
+            error("ERROR: Wrong target EnBi string: "..convert_to_enbi.."\nLua "..Lua_version_as_string.." bytecode's EnBi must contain exactly one zero")
+         end
       elseif version_subset == 0x54 then
          lua_int, lua_float, c_int, c_ptr = c_int, c_ptr
       end
@@ -886,7 +945,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                   local v1, v2 = range:match((("^(@)%-(@)$"):gsub("@", version_pattern)))
                   -- "ver", "ver+", "ver-"
                   local v3, dir = range:match((("^(@)([-+]?)$"):gsub("@", version_pattern)))
-                  assert(v1 or v3, "Invalid version mark "..word)
+                  if not (v1 or v3) then
+                     error("Invalid version mark "..word)
+                  end
                   is_relevant = is_relevant
                      or v1 and Lua_version >= tonumber(v1, 16) and Lua_version <= tonumber(v2, 16)
                      or v3 and (
@@ -908,40 +969,52 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       if Lua_version <= 0x53 then
          -- [u8 intsize] Size of integers
          bytes_per_int = read_byte()
-         assert(bytes_per_int == 4 or bytes_per_int == 8, "Wrong integer size: "..bytes_per_int)
+         if bytes_per_int ~= 4 and bytes_per_int ~= 8 then
+            error("Wrong integer size: "..bytes_per_int)
+         end
          if convert_to_enbi then
             write_byte(convert_to_enbi.bytes_per_int)
          end
 
          -- [u8 size_t] Size of pointers
          bytes_per_pointer = read_byte()
-         assert(bytes_per_pointer == 4 or bytes_per_pointer == 8, "Wrong pointer size")
+         if bytes_per_pointer ~= 4 and bytes_per_pointer ~= 8 then
+            error("Wrong pointer size: "..bytes_per_pointer)
+         end
          if convert_to_enbi then
             write_byte(convert_to_enbi.bytes_per_pointer)
          end
       end
 
       -- [u8 instsize] Size of instructions (always 4)
-      assert(read_byte(true) == 4, "Wrong instruction size")
+      if read_byte(true) ~= 4 then
+         error"Wrong instruction size"
+      end
 
       if Lua_version >= 0x53 then
          -- [u8 luaintsize] Size of Lua integers (usually 8)
          bytes_per_lua_int = read_byte()
-         assert(bytes_per_lua_int == 4 or bytes_per_lua_int == 8, "Wrong Lua integer size")
+         if bytes_per_lua_int ~= 4 and bytes_per_lua_int ~= 8 then
+            error"Wrong Lua integer size"
+         end
          if convert_to_enbi then
             write_byte(convert_to_enbi.bytes_per_lua_int)
          end
 
          -- [u8 luafloatsize] Size of Lua floats (usually 8)
          bytes_per_lua_float = read_byte()
-         assert(bytes_per_lua_float == 4 or bytes_per_lua_float == 8, "Wrong FP number size")
+         if bytes_per_lua_float ~= 4 and bytes_per_lua_float ~= 8 then
+            error"Wrong FP number size"
+         end
          if convert_to_enbi then
             write_byte(convert_to_enbi.bytes_per_lua_float)
          end
       else
          -- [u8 numsize] Size of Lua numbers (usually 8)
          local bytes_per_lua_number = read_byte()
-         assert(bytes_per_lua_number == 4 or bytes_per_lua_number == 8, "Wrong FP number size")
+         if bytes_per_lua_number ~= 4 and bytes_per_lua_number ~= 8 then
+            error"Wrong FP number size"
+         end
          if convert_to_enbi then
             write_byte(convert_to_enbi.bytes_per_lua_float or convert_to_enbi.bytes_per_lua_int)
          end
@@ -970,10 +1043,11 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       read_sizes_of_int_ptr_instr_num()
    end
 
-   if Lua_version >= 0x52 then
-      -- 19 93 0D 0A 1A 0A   Lua magic (used to detect presence of text conversion)
-      assert(read_block(6, true) == "\25\147\13\10\26\10", "Wrong file header")
+   -- 19 93 0D 0A 1A 0A   Lua magic (used to detect presence of text conversion)
+   if Lua_version >= 0x52 and read_block(6, true) ~= "\25\147\13\10\26\10" then
+      error"Wrong file header"
    end
+
 
    if Lua_version >= 0x53 then
       read_sizes_of_int_ptr_instr_num()
@@ -982,14 +1056,18 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       local block = read_block(bytes_per_lua_int)
       if not read_lua_int(block:reverse()):equals(0x5678) then
          is_LE = true
-         assert(read_lua_int(block):equals(0x5678), "Lua integer check failed.\nPossible reason: Mixed-endian bytecodes are not supported.")
+         if not read_lua_int(block):equals(0x5678) then
+            error"Lua integer check failed.\nPossible reason: Mixed-endian bytecodes are not supported."
+         end
       end
       if convert_to_enbi then
          write_lua_int(convert_double_to_lua_int_wo_mt(0x5678))
       end
 
       -- float number check value
-      assert(read_lua_float() == 370.5, "Lua FP number check failed.\nPossible reasons:\n1. Only IEEE-754 floating point numbers are supported.\n2. Mixed-endian bytecodes are not supported.")
+      if read_lua_float() ~= 370.5 then
+         error"Lua FP number check failed.\nPossible reasons:\n1. Only IEEE-754 floating point numbers are supported.\n2. Mixed-endian bytecodes are not supported."
+      end
       if convert_to_enbi then
          write_lua_float(370.5)
       end
@@ -1006,11 +1084,14 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          Ax = (B * 512 + C) * 256 + A
       end
       if Lua_version == 0x51 then
-         -- extra arg in Lua 5.1 is used only for SETLIST instruction, and I hope a table size would be < 1e11
-         assert(Ax > 7 and Ax < 2^25)  -- hence, we can restrict extra arg value to be a positive int32, because 1e11/50 < 2^31
+         -- extra arg in Lua 5.1 is used only for SETLIST instruction, and I hope an array would have less than 1e11 elements
+         -- hence, we can restrict extra arg value to be a positive int32, because 1e11/50 < 2^31
+         if Ax < 8 or Ax >= 2^25 then
+            error""
+         end
          Ax = Ax * 64 + opcode
-      else
-         assert(name == "EXTRAARG")
+      elseif name ~= "EXTRAARG" then
+         error""
       end
       return Ax
    end
@@ -1044,19 +1125,23 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- [int line_start] debug info -- Line number in source code where chunk starts. 0 for the main chunk.
       local src_line_from = read_int()
-      assert(is_root_proto or src_line_from > 0)
+      if not is_root_proto and src_line_from == 0 then
+         error""
+      end
       if src_line_from == 0 then  -- for main chunk
          parent_upv_qty = 0
       end
 
       -- [int line_end] debug info -- Line number in source code where chunk stops. 0 for the main chunk.
       local src_line_to = read_int()
-      assert(src_line_to >= src_line_from)
+      if src_line_to < src_line_from then
+         error""
+      end
 
       if Lua_version == 0x51 then
          upv_qty = read_byte(true)
-         if src_line_from == 0 then  -- for main chunk
-            assert(upv_qty == 0)
+         if src_line_from == 0 and upv_qty ~= 0 then  -- for main chunk
+            error""
          end
          for j = 1, upv_qty do
             all_upvalues[j] = {}
@@ -1065,8 +1150,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- [u8 nparams] -- Number of parameters
       local parameters_qty = read_byte(true)
-      if src_line_from == 0 then  -- for main chunk
-         assert(parameters_qty == 0)
+      if src_line_from == 0 and parameters_qty ~= 0 then  -- for main chunk
+         error""
       end
       -- [u8 varargflags] -- vararg flag
       local is_vararg, has_local_arg, local_arg_contains_table
@@ -1076,9 +1161,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          --   2=VARARG_ISVARARG     -- function is vararg (declared as having "..." in its parameter list)
          --   4=VARARG_NEEDSARG     -- local variable "arg" is initialized with an array of arguments with field "n" (this flag is set for every vararg function not using "..." in its body)
          local n = read_byte(true)
-         assert(n < 8, "Wrong vararg flags")
-         if src_line_from == 0 then  -- for main chunk
-            assert(n == 2)
+         if n >= 8 or src_line_from == 0 and n ~= 2 then
+            error"Wrong vararg flags"
          end
          is_vararg = n % 4 > 1
          has_local_arg = n % 2 > 0
@@ -1086,8 +1170,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       else
          -- 5.2+  is_vararg = 0/1
          is_vararg = read_boolean(true)
-         if src_line_from == 0 then  -- for main chunk
-            assert(is_vararg)
+         if src_line_from == 0 and not is_vararg then  -- for main chunk
+            error""
          end
       end
 
@@ -1096,7 +1180,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- Instructions
       local instr_qty = read_int()
-      assert(instr_qty > 0)
+      if instr_qty == 0 then
+         error""
+      end
       local all_instructions = {}  -- [1..n] = {opcode=, A=, B=, C=, k=, name=, location_in_file="...", src_line_no=, instr_as_text=, instr_as_luac=, is_reachable=}
       -- [int ninstructions]
       for j = 1, instr_qty do
@@ -1196,15 +1282,19 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          local subtype_id = (const_type_id - base_type_id) / 16
          if base_type_id == 3 or base_type_id == 4 then
             subtype_id = subtype_id - (Lua_version >= 0x54 and 1 or 0)
-            assert(subtype_id == 0 or Lua_version >= 0x53 and subtype_id == 1, "Unknown constant type = "..const_type_id)
+            if subtype_id ~= 0 and (Lua_version <= 0x52 or subtype_id ~= 1) then
+               error("Unknown constant type = "..const_type_id)
+            end
          end
          local const_type, const_value, const_value_as_text, file_offset, data_in_file
          if base_type_id == 4 then
             -- type 4:  string
             const_type = "string"
-            const_value, file_offset = assert(read_string())
+            const_value, file_offset = read_string()
+            if not const_value then
+               error"String is absent"
+            end
             data_in_file = const_value
-            assert(const_value, "String is absent")
             const_value_as_text = serialize_string_value(const_value)
          elseif base_type_id == 3 then
             -- type 3:  number
@@ -1264,7 +1354,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          -- this function is invoked only for 5.2+ bytecodes
          -- [int nupvals]
          upv_qty = read_int()
-         assert(upv_qty == (qty or upv_qty))
+         if upv_qty ~= (qty or upv_qty) then
+            error""
+         end
          for j = 1, upv_qty do
             -- [u8 stack] -- 1 = in registers of enclosing function, 0 = in upvalues of enclosing function
             local in_locals = read_boolean(true)
@@ -1272,16 +1364,16 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             local index = read_byte(true)
             if not in_locals then
                index = index + 1
-               if parent_upv_qty then
-                  assert(index <= parent_upv_qty, "Upvalue index is out of range")
-               else
+               if not parent_upv_qty then
                   max_used_parent_upvalue_index = math.max(max_used_parent_upvalue_index, index)
+               elseif index > parent_upv_qty then
+                  error"Upvalue index is out of range"
                end
             end
             all_upvalues[j] = {in_locals = in_locals, index = index}    -- [1..n] = {in_locals=true/false, index=, var_name=}
          end
-         if src_line_from == 0 then  -- for main chunk
-            assert(upv_qty == 1 and all_upvalues[1].in_locals and all_upvalues[1].index == 0)
+         if src_line_from == 0 and (upv_qty ~= 1 or not all_upvalues[1].in_locals or all_upvalues[1].index ~= 0) then
+            error"Main chunk must have single upvalue"
          end
       end
 
@@ -1297,13 +1389,17 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          local proto, debug_info_in_proto, max_upvalue_index_used_52_in_proto = parse_proto(false, upv_qty)
          all_protos[j] = proto
          debug_info = debug_info or debug_info_in_proto
-         assert(debug_info == debug_info_in_proto)
+         if debug_info ~= debug_info_in_proto then
+            error""
+         end
          max_upvalue_index_used_52 = math.max(max_upvalue_index_used_52, max_upvalue_index_used_52_in_proto)
       end
 
       if Lua_version == 0x52 then
          parse_upvalues()
-         assert(max_upvalue_index_used_52 <= upv_qty, "Upvalue index is out of range")
+         if max_upvalue_index_used_52 > upv_qty then
+            error"Upvalue index is out of range"
+         end
          -- [string source] | debug info
          source = read_string()
          local new_debug_info
@@ -1313,15 +1409,21 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             new_debug_info = "stripped"
          end
          debug_info = debug_info or new_debug_info
-         assert(debug_info == (new_debug_info or debug_info))
+         if debug_info ~= (new_debug_info or debug_info) then
+            error""
+         end
       end
 
       -- [int nlines]
       local lines_qty = read_int()
-      assert(lines_qty == 0 or lines_qty == instr_qty)
+      if lines_qty ~= 0 and lines_qty ~= instr_qty then
+         error""
+      end
       local new_debug_info = lines_qty > 0 and "included" or "stripped"
       debug_info = debug_info or new_debug_info
-      assert(debug_info == new_debug_info)
+      if debug_info ~= new_debug_info then
+         error""
+      end
       if Lua_version <= 0x53 then
          for j = 1, lines_qty do
             -- [int line]
@@ -1336,41 +1438,65 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          end
          -- [int nabslines]
          local abs_lines_qty = read_int()
-         assert(
-            debug_info == "included" and abs_lines_qty <= lines_qty or
-            debug_info == "stripped" and abs_lines_qty == 0
-         )
+         if
+            not (
+               debug_info == "included" and abs_lines_qty <= lines_qty
+               or
+               debug_info == "stripped" and abs_lines_qty == 0
+            )
+         then
+            error""
+         end
          local prev_pc = 0
          for j = 1, abs_lines_qty do
             -- [int pc]
             local pc = read_int() + 1
-            assert(pc > prev_pc and diff[pc] == -128)
+            if pc <= prev_pc or diff[pc] ~= -128 then
+               error""
+            end
             -- [int line]
             local abs_line_no = read_int()
-            assert(abs_line_no >= 1)
+            if abs_line_no == 0 then
+               error""
+            end
             abs_no[pc] = abs_line_no
             prev_pc = pc
          end
          local line_no = src_line_from
          for j = 1, lines_qty do
             local d = diff[j]
-            line_no = d == -128 and assert(abs_no[j]) or line_no + d
+            if d == -128 then
+               line_no = abs_no[j]
+               if not line_no then
+                  error""
+               end
+            else
+               line_no = line_no + d
+            end
             all_instructions[j].src_line_no = line_no
          end
       end
 
       -- [int nlocals]
       local locals_qty = read_int()
-      assert(
-         debug_info == "included" and locals_qty >= parameters_qty + (has_local_arg and 1 or 0) or
-         debug_info == "stripped" and locals_qty == 0
-      )
+      if
+         not (
+            debug_info == "included" and locals_qty >= parameters_qty + (has_local_arg and 1 or 0)
+            or
+            debug_info == "stripped" and locals_qty == 0
+         )
+      then
+         error""
+      end
       local all_locals = {}
       do
          local regs = {[0] = math.huge}
          for j = 1, locals_qty do
             -- [string name]  debug info
-            local local_var_name = assert(read_string())
+            local local_var_name = read_string()
+            if not local_var_name then
+               error""
+            end
             -- [int startpc]  It comes into scope at instruction #startpc
             local start_pc = read_int() + 1
             -- [int endpc]    It goes out of scope at instruction #endpc
@@ -1387,13 +1513,22 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- [int nupvalnames]
       local upval_names_qty = read_int()
-      assert(
-         debug_info == "included" and upval_names_qty == upv_qty or
-         debug_info == "stripped" and upval_names_qty == 0
-      )
+      if
+         not (
+            debug_info == "included" and upval_names_qty == upv_qty
+            or
+            debug_info == "stripped" and upval_names_qty == 0
+         )
+      then
+         error""
+      end
       for j = 1, upval_names_qty do
          -- [string name]  debug info
-         all_upvalues[j].var_name = assert(read_string())
+         local name = read_string()
+         if not name then
+            error""
+         end
+         all_upvalues[j].var_name = name
       end
       if src_line_from == 0 and Lua_version >= 0x52 and not all_upvalues[1].var_name then
          -- if debug info is stripped, set the name of main chunk's upvalue
@@ -1434,9 +1569,15 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          local instr_as_luac, instr_as_text
          local is_really_an_instruction = data_items_ahead == 0
          if name then
-            local instr_info = assert(instr_modes[name])
+            local instr_info = instr_modes[name]
+            if not instr_info then
+               error""
+            end
             local data_1, data_2, data_3, data_4 = instr_info[2] or "", instr_info[3] or "", instr_info[4] or "", instr_info[5] or ""
-            local instr_writes_to, group, B_mode, C_mode, mode, k_matters = assert(instr_info[1]:match"^.(.)(.)(.)(.)(i.-)(k?)$")
+            local instr_writes_to, group, B_mode, C_mode, mode, k_matters = instr_info[1]:match"^.(.)(.)(.)(.)(i.-)(k?)$"
+            if not mode then
+               error""
+            end
             k_matters = k and k_matters ~= ""
             --------------------------------------------------------------------------------
             -- Instruction Modes 5.1-5.3:
@@ -1476,12 +1617,16 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                if is_really_an_instruction then
                   if B_mode == "J" or B_mode == "j" then
                      local target_pc = pc + 1 + Bx * (B_mode == "J" and 1 or -1)
-                     assert(target_pc > 0)
+                     if target_pc <= 0 then
+                        error""
+                     end
                      params = {A, "<"..target_pc..">"}
                   elseif B_mode == "k" then
                      params = {A, "@Const#"..(Bx + 1)}
                   else
-                     assert(B_mode == "U")
+                     if B_mode ~= "U" then
+                        error""
+                     end
                      params = {A, Bx}
                   end
                end
@@ -1490,25 +1635,35 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                if is_really_an_instruction then
                   if B_mode == "J" then
                      local target_pc = pc + 1 + sBx
-                     assert(target_pc > 0)
+                     if target_pc <= 0 then
+                        error""
+                     end
                      params = {A, "<"..target_pc..">"}
                   else
-                     assert(B_mode == "U")
+                     if B_mode ~= "U" then
+                        error""
+                     end
                      params = {A, sBx}
                   end
                end
                params_luac = {A, sBx}
             elseif mode == "isBx" then
                if is_really_an_instruction then
-                  assert(B_mode == "J")
+                  if B_mode ~= "J" then
+                     error""
+                  end
                   local target_pc = pc + 1 + sBx
-                  assert(target_pc > 0)
+                  if target_pc <= 0 then
+                     error""
+                  end
                   params = {"<"..target_pc..">"}
                end
                params_luac = {sBx}
             elseif mode == "isJ" then
                local target_pc = pc + 1 + sJ
-               assert(target_pc > 0)
+               if target_pc <= 0 then
+                  error""
+               end
                params = {"<"..target_pc..">"}
                params_luac = {sJ}
             elseif mode == "iAx" then
@@ -1523,15 +1678,18 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             instr_as_luac = name:gsub("5[14]$", "").." "..table.concat(params_luac, " ")..(k_matters and " "..k or "")
             if is_reachable then
                if is_really_an_instruction then
-                  if instr.reads_top then
-                     assert(all_instructions[pc - 1].writes_top)
-                  end
-                  if instr.writes_top then
-                     assert(all_instructions[pc + 1].reads_top)
+                  if
+                     instr.reads_top and not all_instructions[pc - 1].writes_top
+                     or
+                     instr.writes_top and not all_instructions[pc + 1].reads_top
+                  then
+                     error""
                   end
                   local const_with_global_var_name
                   if group == "1" then  -- binary operators
-                     assert(mode == "iABC")
+                     if mode ~= "iABC" then
+                        error""
+                     end
                      if name == "GETTABUP" then
                         params[2] = B + 1
                         const_with_global_var_name = C - 255
@@ -1539,10 +1697,14 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                         params[2] = B + 1
                         const_with_global_var_name = C + 1
                         local const = all_consts[const_with_global_var_name]
-                        assert(const and const.type == "string", "GETTABUP with non-string key")
+                        if not const or const.type ~= "string" then
+                           error"GETTABUP with non-string key"
+                        end
                      elseif name == "GETFIELD" then
                         local const = all_consts[C + 1]
-                        assert(const and const.type == "string", "GETFIELD with non-string key")
+                        if not const or const.type ~= "string" then
+                           error"GETFIELD with non-string key"
+                        end
                      end
                      instr_as_text = "@@R"..A.." = "..data_1..params[2]..data_2..params[3]..data_3
                   elseif group == "2" then   -- unary operators
@@ -1551,12 +1713,18 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                         data_items_ahead, data_descr = 1
                         params[2] = "@Const#"..(extra + 1)
                      else
-                        assert(mode == "iAB" or mode == "iABx" or mode == "iA")
+                        if mode ~= "iAB" and mode ~= "iABx" and mode ~= "iA" then
+                           error""
+                        end
                         if name == "GETUPVAL" then
-                           assert(mode == "iAB")
+                           if mode ~= "iAB" then
+                              error""
+                           end
                            params[2] = B + 1
                         elseif name == "CLOSURE" then
-                           assert(mode == "iABx")
+                           if mode ~= "iABx" then
+                              error""
+                           end
                            params[2] = Bx + 1
                            if Lua_version == 0x51 then
                               data_items_ahead, data_descr, last_closure_51_pc, last_closure_51_upvalues = all_protos[Bx + 1].upv_qty, "upvalue_info_51", pc, all_protos[Bx + 1].all_upvalues
@@ -1564,7 +1732,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                         elseif name == "GETGLOBAL" then
                            const_with_global_var_name = Bx + 1
                            local const = all_consts[const_with_global_var_name]
-                           assert(const and const.type == "string" and is_correct_identifier(const.value, Lua_version), "GETGLOBAL with invalid global variable name")
+                           if not const or const.type ~= "string" or not is_correct_identifier(const.value, Lua_version) then
+                              error"GETGLOBAL with invalid global variable name"
+                           end
                         end
                      end
                      instr_as_text = "@@R"..A.." = "..data_1..params[2]..data_2
@@ -1576,18 +1746,26 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                         params[1] = A + 1
                         const_with_global_var_name = B + 1
                         local const = all_consts[const_with_global_var_name]
-                        assert(const and const.type == "string", "SETTABUP with non-string key")
+                        if not const or const.type ~= "string" then
+                           error"SETTABUP with non-string key"
+                        end
                      elseif name == "SETUPVAL" then
                         params[2] = B + 1
                      elseif name == "SETGLOBAL" then
                         const_with_global_var_name = Bx + 1
                         local const = all_consts[const_with_global_var_name]
-                        assert(const and const.type == "string" and is_correct_identifier(const.value, Lua_version), "SETGLOBAL with invalid global variable name")
+                        if not const or const.type ~= "string" or not is_correct_identifier(const.value, Lua_version) then
+                           error"SETGLOBAL with invalid global variable name"
+                        end
                      elseif name == "SETFIELD" then
                         local const = all_consts[B + 1]
-                        assert(const and const.type == "string", "SETFIELD with non-string key")
+                        if not const or const.type ~= "string" then
+                           error"SETFIELD with non-string key"
+                        end
                      elseif name == "VARARGPREP" then
-                        assert(parameters_qty == A, "VARARGPREP with wrong number of fixed parameters")
+                        if parameters_qty ~= A then
+                           error"VARARGPREP with wrong number of fixed parameters"
+                        end
                      end
                      -- group == "3" -- the same order of parameters
                      -- group == "4" -- first two parameters swapped
@@ -1598,11 +1776,16 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      instr_as_text = data_1..param1..data_2..(param2 or "")..data_3..(params[3] or "")..data_4
                   elseif group == "5" or group == "6" or group == "7" then
                      -- binary operators with constant(5,6) or immediate integer(7) and sometimes swapped arguments
-                     assert(mode == "iABC")
+                     if mode ~= "iABC" then
+                        error""
+                     end
                      if group ~= "7" then
-                        local const = assert(all_consts[C + 1])
-                        if group == "6" then
-                           assert(const.type == "integer", "bitwise operator with non-integer constant")
+                        local const = all_consts[C + 1]
+                        if not const then
+                           error""
+                        end
+                        if group == "6" and const.type ~= "integer" then
+                           error"bitwise operator with non-integer constant"
                         end
                      end
                      local param2, param3 = params[2], params[3]
@@ -1634,14 +1817,20 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                   elseif name == "TFORPREP" then
                      -- A Bx       mark R(A+3) "to be closed";  pc+=Bx
                      local loop_end_instr = all_instructions[pc + 1 + Bx]
-                     assert(loop_end_instr and loop_end_instr.name == "TFORCALL54" and loop_end_instr.A == A, "TFORPREP without TFORCALL")
+                     if not loop_end_instr or loop_end_instr.name ~= "TFORCALL54" or loop_end_instr.A ~= A then
+                        error"TFORPREP without TFORCALL"
+                     end
                      instr_as_text = "mark @R"..(A+3).." 'to-be-closed';  GOTO "..params[2]
                   elseif name == "TFORCALL" or name == "TFORCALL54" then
                      -- TFORCALL       A C        R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2))
                      -- TFORCALL54     A C        R(A+4), ... ,R(A+3+C) := R(A)(R(A+1), R(A+2))
-                     assert(C > 0)
+                     if C == 0 then
+                        error""
+                     end
                      local next_instr = all_instructions[pc + 1]
-                     assert(next_instr and next_instr.name == "TFORLOOP"..name:sub(9), "TFORCALL without TFORLOOP")
+                     if not next_instr or next_instr.name ~= "TFORLOOP"..name:sub(9) then
+                        error"TFORCALL without TFORLOOP"
+                     end
                      local shift = name == "TFORCALL" and 0 or 1
                      local vars = regs(A + 3 + shift, A + 2 + C + shift, true)
                      loop_statement = "for "..vars.." in @R"..A..", @R"..(A+1)..", @R"..(A+2)..(name == "TFORCALL54" and ", @R"..(A+3) or "").." do"
@@ -1651,27 +1840,36 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      -- TFORLOOP54     A Bx       if R(A+2) ~= nil then { R(A)=R(A+2); pc-=Bx }
                      do
                         local prev_instr = all_instructions[pc - 1]
-                        assert(prev_instr and prev_instr.name == "TFORCALL"..name:sub(9) and prev_instr.A == A-2, "TFORLOOP without TFORCALL")
+                        if not prev_instr or prev_instr.name ~= "TFORCALL"..name:sub(9) or prev_instr.A ~= A-2 then
+                           error"TFORLOOP without TFORCALL"
+                        end
                      end
                      local jump_offset = name == "TFORLOOP" and sBx or -Bx
-                     local loop_start_instr = assert(jump_offset < 0 and all_instructions[pc + jump_offset])
+                     local loop_start_instr = jump_offset < 0 and all_instructions[pc + jump_offset]
+                     if not loop_start_instr then
+                        error""
+                     end
                      do
                         local loop_start_instr_name = loop_start_instr.name
                         local B, C = loop_start_instr.B, loop_start_instr.C
-                        assert(
+                        if
                            (
                               name == "TFORLOOP" and loop_start_instr_name == "JMP" and B * 512 + C - 131071
                               or
                               name == "TFORLOOP54" and loop_start_instr_name == "TFORPREP" and (C * 256 + B) * 2 + loop_start_instr.k
-                           ) == -2 - jump_offset, "Wrong TFORLOOP usage"
-                        )
+                           ) ~= -2 - jump_offset
+                        then
+                           error"Wrong TFORLOOP usage"
+                        end
                      end
                      loop_start_instr.instr_as_text = loop_start_instr.instr_as_text.." -- "..loop_statement
                      local RA1 = "@R"..(name == "TFORLOOP" and A + 1 or A + 2)
                      instr_as_text = "if "..RA1.." ~= nil then { @@R"..A.." = "..RA1..";  GOTO "..params[2].." } -- end of loop"
                   elseif name == "TFORLOOP51" then
                      -- A C     R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2)); if R(A+3) ~= nil then R(A+2)=R(A+3) else pc++
-                     assert(C > 0 and (all_instructions[pc + 1] or {}).name == "JMP51", "Wrong TFORLOOP usage")
+                     if C == 0 or (all_instructions[pc + 1] or {}).name ~= "JMP51" then
+                        error"Wrong TFORLOOP usage"
+                     end
                      local vars = regs(A + 3, A + 2 + C, true)
                      loop_statement = "for "..vars.." in @R"..A..", @R"..(A+1)..", @R"..(A+2).." do"
                      instr_as_text = vars.." = @R"..A.."(@R"..(A+1)..", @R"..(A+2)..");  if @R"..(A+3).." ~= nil then @@R"..(A+2).." = @R"..(A+3).." else GOTO <"..(pc + 2)..">"
@@ -1692,8 +1890,14 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                            "NOP"
                      if (all_instructions[pc - 1] or {}).name == "TFORLOOP51" then
                         local loop_start_instr = all_instructions[pc + sBx]
-                        assert(sBx < 0 and loop_start_instr and loop_start_instr.name == "JMP51"
-                           and loop_start_instr.B * 512 + loop_start_instr.C - 131071 == -2 - sBx, "Wrong TFORLOOP usage")
+                        if
+                           sBx >= 0
+                           or not loop_start_instr
+                           or loop_start_instr.name ~= "JMP51"
+                           or loop_start_instr.B * 512 + loop_start_instr.C - 131071 ~= -2 - sBx
+                        then
+                           error"Wrong TFORLOOP usage"
+                        end
                         loop_start_instr.instr_as_text = loop_start_instr.instr_as_text.." -- "..loop_statement
                         instr_as_text = instr_as_text.." -- end of loop"
                      end
@@ -1703,15 +1907,21 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      instr_as_text = regs(A, name == "LOADNIL" and A + B or B, true).." = nil"
                   elseif name == "SELF" then
                      -- A B C   R(A+1) := R(B); R(A) := R(B)[RK(C):identifier]
-                     assert(C > 255 or k == 1, "SELF with not-a-constant as method name")
+                     if C <= 255 and k ~= 1 then
+                        error"SELF with not-a-constant as method name"
+                     end
                      local const = all_consts[C + (k or 0) * 256 - 255]
-                     assert(const and const.type == "string" and is_correct_identifier(const.value, Lua_version), "SELF with invalid method name")
+                     if not const or const.type ~= "string" or not is_correct_identifier(const.value, Lua_version) then
+                        error"SELF with invalid method name"
+                     end
                      instr_as_text = "@@R"..(A+1).." = @R"..B..";  @@R"..A.." = @R"..B.."["..params[3].."]   -- prepare for @R"..B..":"..const.value.."()"
                   elseif group == "8" then
                      -- FORPREP      A sBx      R(A)-=R(A+2); pc+=sBx
                      -- FORPREP54    A Bx       if R(A) >? R(A+1) then pc+=Bx+1 else R(A+3) := R(A)
                      local jump_offset = name == "FORPREP" and sBx or Bx
-                     assert(jump_offset >= 0 and (all_instructions[pc + 1 + jump_offset] or {}).name == "FORLOOP"..name:sub(8), "FORPREP without FORLOOP")
+                     if jump_offset < 0 or (all_instructions[pc + 1 + jump_offset] or {}).name ~= "FORLOOP"..name:sub(8) then
+                        error"FORPREP without FORLOOP"
+                     end
                      local param_2 = params[2]
                      if name == "FORPREP" then
                         instr_as_text = "@@R"..A.." -= @R"..(A+2)..";  GOTO "..param_2
@@ -1725,28 +1935,42 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      -- FORLOOP54    A Bx       R(A)+=R(A+2); if R(A) <?= R(A+1) then { R(A+3)=R(A); pc-=Bx  }
                      local jump_offset = name == "FORLOOP" and sBx or -Bx
                      local instr = all_instructions[pc + jump_offset]
-                     assert(jump_offset < 0 and instr and instr.name == "FORPREP"..name:sub(8)
-                        and (name == "FORLOOP" and instr.B * 512 + instr.C - 131071 or (instr.C * 256 + instr.B) * 2 + instr.k) == -1 - jump_offset,
-                        "FORLOOP without FORPREP")
+                     if
+                        jump_offset >= 0
+                        or not instr
+                        or instr.name ~= "FORPREP"..name:sub(8)
+                        or (name == "FORLOOP" and instr.B * 512 + instr.C - 131071 or (instr.C * 256 + instr.B) * 2 + instr.k) ~= -1 - jump_offset
+                     then
+                        error"FORLOOP without FORPREP"
+                     end
                      instr_as_text = "@@R"..A.." += @R"..(A+2)..";  if @R"..A.." <?= @R"..(A+1).." then { @@R"..(A+3).." = @R"..A..";  GOTO "..params[2].." } -- end of loop"
                   elseif name == "TESTSET" or name == "TESTSET54" then
                      -- TESTSET    A B C      if (R(B) <=> C) then R(A) := R(B) else pc++
                      -- TESTSET54  A B k      if (not R(B) == k) then pc++ else R(A) := R(B)
                      local cond = name == "TESTSET" and C or k
-                     assert(cond < 2 and all_instructions[pc + 1].name:sub(1, 3) == "JMP")
+                     if cond >= 2 or all_instructions[pc + 1].name:sub(1, 3) ~= "JMP" then
+                        error""
+                     end
                      instr_as_text = "if "..(cond > 0 and "" or "not ").."@R"..B.." then @@R"..A.." = @R"..B.." else GOTO <"..(pc + 2)..">"
                   elseif name == "TEST" or name == "TEST54" then
                      -- TEST    A C        if not (R(A) <=> C) then pc++
                      -- TEST54  A k        if (not R(A) == k) then pc++
                      local cond = name == "TEST" and C or k
-                     assert(cond < 2 and all_instructions[pc + 1].name:sub(1, 3) == "JMP")
+                     if cond >= 2 or all_instructions[pc + 1].name:sub(1, 3) ~= "JMP" then
+                        error""
+                     end
                      instr_as_text = "if "..(cond > 0 and "not " or "").."@R"..A.." then GOTO <"..(pc + 2)..">"
                   elseif group == "=" then
                      -- EQ   A B C   if ((RK(B) == RK(C)) ~= A) then pc++
                      -- LE   A B C   if ((RK(B) <= RK(C)) ~= A) then pc++
                      -- LT   A B C   if ((RK(B) <  RK(C)) ~= A) then pc++
-                     assert(A < 2 and all_instructions[pc + 1].name:sub(1, 3) == "JMP")
-                     local operation = assert(({LE = " <= ", LT = " < ", EQ = " == "})[name])
+                     if A >= 2 or all_instructions[pc + 1].name:sub(1, 3) ~= "JMP" then
+                        error""
+                     end
+                     local operation = ({LE = " <= ", LT = " < ", EQ = " == "})[name]
+                     if not operation then
+                        error""
+                     end
                      local left, right = params[2], params[3]
                      if B > 255 and C <= 255 then
                         left, right = right, left
@@ -1771,9 +1995,14 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      -- LT54     A B k      if ((R(A) <  R(B)) ~= k) then pc++
                      -- LTI      A sB C k   if ((R(A) <  sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
                      -- GTI      A sB C k   if ((R(A) >  sB  ) ~= k) then pc++   (C==0: sB is integer, C==1: sB is float)
-                     assert(all_instructions[pc + 1].name == "JMP54")
+                     if all_instructions[pc + 1].name ~= "JMP54" then
+                        error""
+                     end
                      local name2 = name:sub(1, 2)
-                     local operation = assert(({LE = " <= ", GE = " >= ", LT = " < ", GT = " > ", EQ = " == "})[name2])
+                     local operation = ({LE = " <= ", GE = " >= ", LT = " < ", GT = " > ", EQ = " == "})[name2]
+                     if not operation then
+                        error""
+                     end
                      local opn, cls = "", ""
                      if k > 0 then
                         if name2 == "EQ" then
@@ -1814,7 +2043,9 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      if name == "CONCAT54" then
                         from, to = A, A + B - 1
                      end
-                     assert(to > from)
+                     if to <= from then
+                        error""
+                     end
                      local t = {}
                      for j = from, to do
                         table.insert(t, "@R"..j)
@@ -1837,9 +2068,13 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                         -- C > 0 means the function is vararg and (C - 1) is its number of
                         -- fixed parameters.
                         if k > 0 then
-                           assert(C == (is_vararg and parameters_qty + 1 or 0), "Wrong parameter C in TAILCALL")
+                           if C ~= (is_vararg and parameters_qty + 1 or 0) then
+                              error"Wrong parameter C in TAILCALL"
+                           end
                         else
-                           assert(not is_vararg, "TAILCALL with k=0 inside vararg function")
+                           if is_vararg then
+                              error"TAILCALL with k=0 inside vararg function"
+                           end
                         end
                      end
                      instr_as_text = "RETURN @R"..A.."("..(B == 1 and "" or regs(A+1, B>0 and A+B-1))..")"
@@ -1849,16 +2084,22 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      --    (*) If (B == 0) then return up to 'top'.
                      if name == "RETURN54" then
                         if k > 0 then
-                           assert(C == (is_vararg and parameters_qty + 1 or 0), "Wrong parameter C in RETURN")
+                           if C ~= (is_vararg and parameters_qty + 1 or 0) then
+                              error"Wrong parameter C in RETURN"
+                           end
                         else
-                           assert(not is_vararg, "RETURN with k=0 inside vararg function")
+                           if is_vararg then
+                              error"RETURN with k=0 inside vararg function"
+                           end
                         end
                      end
                      instr_as_text = "RETURN"..(B == 1 and "" or " "..regs(A, B>0 and A+B-2))
                   elseif name == "RETURN0" or name == "RETURN1" then
                      -- RETURN0                return
                      -- RETURN1     A          return R(A)
-                     assert(not is_vararg, name.." inside vararg function")
+                     if is_vararg then
+                        error(name.." inside vararg function")
+                     end
                      instr_as_text = "RETURN"..(name == "RETURN1" and " @R"..A or "")
                   elseif name == "VARARG" or name == "VARARG54" then
                      -- VARARG    A B        R(A), R(A+1), ..., R(A+B-2) = vararg
@@ -1868,10 +2109,19 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      instr_as_text = n == 0 and "NOP" or (regs(A, n > 0 and A + (n-1), true).." = ...")
                   elseif name == "LOADBOOL" then
                      --@  A B C   R(A) := (Bool)B; if (C) pc++
-                     assert(B < 2 and C < 2)
+                     if B >= 2 or C >= 2 then
+                        error""
+                     end
                      if C > 0 then
                         local next_instr = all_instructions[pc + 1]
-                        assert(next_instr.name == name and next_instr.A == A and next_instr.B + B == 1 and next_instr.C == 0)
+                        if
+                           next_instr.name ~= name
+                           or next_instr.A ~= A
+                           or next_instr.B + B ~= 1
+                           or next_instr.C ~= 0
+                        then
+                           error""
+                        end
                      end
                      instr_as_text = "@@R"..A.." = "..tostring(B > 0)..(C > 0 and ";  GOTO <"..(pc + 2)..">" or "")
                   else
@@ -1950,13 +2200,17 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
                      end
                   end
                elseif data_descr == "upvalue_info_51" then
-                  assert(name == "GETUPVAL" or name == "MOVE")
+                  if name ~= "GETUPVAL" and name ~= "MOVE" then
+                     error""
+                  end
                   local upv_info = last_closure_51_upvalues[pc - last_closure_51_pc]
                   if name == "MOVE" then
                      upv_info.in_locals = true
                      upv_info.index = B
                   else
-                     assert(B < upv_qty, "Upvalue index is out of range")
+                     if B >= upv_qty then
+                        error"Upvalue index is out of range"
+                     end
                      upv_info.index = B + 1
                   end
                end
@@ -2121,7 +2375,10 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
             function(dogs, word, num)
                local suffix = ""
                if word == "R" then
-                  local num = assert(tonumber(num))
+                  local num = tonumber(num)
+                  if not num then
+                     error""
+                  end
                   for _, loc in ipairs(all_locals) do
                      if loc.reg_no == num and pc >= (dogs == "@" and loc.start_pc or loc.def_pc) and pc <= loc.end_pc then
                         loc = loc.var_name
@@ -2135,7 +2392,10 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
                      suffix = "@arg"
                   end
                elseif word == "Const#" then
-                  local const = assert(all_consts[tonumber(num)], "Const index is out of range")
+                  local const = all_consts[tonumber(num)]
+                  if not const then
+                     error"Const index is out of range"
+                  end
                   local const_value_as_text = const.value_as_text
                   if #const_value_as_text < 50 then
                      table.insert(comments, word..num)
@@ -2147,7 +2407,11 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
                   end
                elseif word == "Upvalue#" then
                   word = "Upv#"
-                  local upv = assert(all_upvalues[tonumber(num)], "Upvalue index is out of range").var_name
+                  local upv = all_upvalues[tonumber(num)]
+                  if not upv then
+                     error"Upvalue index is out of range"
+                  end
+                  upv = upv.var_name
                   if upv then
                      suffix = "@"..upv
                   end
