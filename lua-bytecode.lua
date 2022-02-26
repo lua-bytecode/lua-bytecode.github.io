@@ -1,9 +1,10 @@
 -- lua-bytecode.lua
 
--- PUC Lua (5.1, 5.2, 5.3, 5.4.0-alpha) bytecode viewer and converter
+-- PUC Lua (5.1, 5.2, 5.3) bytecode viewer and converter
+-- Lua 5.4 bytecode is not supported yet
 -- This module could be run under any Lua 5.1+ having 64-bit "double" floating point Lua numbers
 
--- Version: 2019-07-20
+-- Version: 2022-02-26
 
 
 -- must have "double" Lua numbers
@@ -1108,7 +1109,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
    end
 
    local function parse_proto(is_root_proto, parent_upv_qty)
-      local max_used_parent_upvalue_index, all_upvalues, upv_qty, source, debug_info = 0, {}  -- debug_info = "stripped"/"included"/nil
+      local max_used_parent_upvalue_index, all_upvalues, upv_qty, source, debug_info = 0, {}
 
       if Lua_version >= 0x53 and is_root_proto then
          upv_qty = read_byte(true)
@@ -1117,18 +1118,13 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       if Lua_version ~= 0x52 then
          source = read_string()
          if source then
-            debug_info = "included"
-         elseif is_root_proto then
-            debug_info = "stripped"
+            debug_info = true
          end
       end
 
       -- [int line_start] debug info -- Line number in source code where chunk starts. 0 for the main chunk.
       local src_line_from = read_int()
-      if not is_root_proto and src_line_from == 0 then
-         error""
-      end
-      if src_line_from == 0 then  -- for main chunk
+      if is_root_proto then  -- for main chunk
          parent_upv_qty = 0
       end
 
@@ -1140,7 +1136,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       if Lua_version == 0x51 then
          upv_qty = read_byte(true)
-         if src_line_from == 0 and upv_qty ~= 0 then  -- for main chunk
+         if is_root_proto and upv_qty ~= 0 then  -- for main chunk
             error""
          end
          for j = 1, upv_qty do
@@ -1150,7 +1146,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- [u8 nparams] -- Number of parameters
       local parameters_qty = read_byte(true)
-      if src_line_from == 0 and parameters_qty ~= 0 then  -- for main chunk
+      if is_root_proto and parameters_qty ~= 0 then  -- for main chunk
          error""
       end
       -- [u8 varargflags] -- vararg flag
@@ -1161,7 +1157,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          --   2=VARARG_ISVARARG     -- function is vararg (declared as having "..." in its parameter list)
          --   4=VARARG_NEEDSARG     -- local variable "arg" is initialized with an array of arguments with field "n" (this flag is set for every vararg function not using "..." in its body)
          local n = read_byte(true)
-         if n >= 8 or src_line_from == 0 and n ~= 2 then
+         if n >= 8 or is_root_proto and n ~= 2 then
             error"Wrong vararg flags"
          end
          is_vararg = n % 4 > 1
@@ -1170,7 +1166,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       else
          -- 5.2+  is_vararg = 0/1
          is_vararg = read_boolean(true)
-         if src_line_from == 0 and not is_vararg then  -- for main chunk
+         if is_root_proto and not is_vararg then  -- for main chunk
             error""
          end
       end
@@ -1372,7 +1368,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             end
             all_upvalues[j] = {in_locals = in_locals, index = index}    -- [1..n] = {in_locals=true/false, index=, var_name=}
          end
-         if src_line_from == 0 and (upv_qty ~= 1 or not all_upvalues[1].in_locals or all_upvalues[1].index ~= 0) then
+         if is_root_proto and (upv_qty ~= 1 or not all_upvalues[1].in_locals or all_upvalues[1].index ~= 0) then
             error"Main chunk must have single upvalue"
          end
       end
@@ -1389,9 +1385,6 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          local proto, debug_info_in_proto, max_upvalue_index_used_52_in_proto = parse_proto(false, upv_qty)
          all_protos[j] = proto
          debug_info = debug_info or debug_info_in_proto
-         if debug_info ~= debug_info_in_proto then
-            error""
-         end
          max_upvalue_index_used_52 = math.max(max_upvalue_index_used_52, max_upvalue_index_used_52_in_proto)
       end
 
@@ -1402,15 +1395,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          end
          -- [string source] | debug info
          source = read_string()
-         local new_debug_info
          if source then
-            new_debug_info = "included"
-         elseif is_root_proto then
-            new_debug_info = "stripped"
-         end
-         debug_info = debug_info or new_debug_info
-         if debug_info ~= (new_debug_info or debug_info) then
-            error""
+            debug_info = true
          end
       end
 
@@ -1419,10 +1405,8 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
       if lines_qty ~= 0 and lines_qty ~= instr_qty then
          error""
       end
-      local new_debug_info = lines_qty > 0 and "included" or "stripped"
-      debug_info = debug_info or new_debug_info
-      if debug_info ~= new_debug_info then
-         error""
+      if lines_qty > 0 then
+         debug_info = true
       end
       if Lua_version <= 0x53 then
          for j = 1, lines_qty do
@@ -1438,13 +1422,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          end
          -- [int nabslines]
          local abs_lines_qty = read_int()
-         if
-            not (
-               debug_info == "included" and abs_lines_qty <= lines_qty
-               or
-               debug_info == "stripped" and abs_lines_qty == 0
-            )
-         then
+         if not (abs_lines_qty <= lines_qty) then
             error""
          end
          local prev_pc = 0
@@ -1479,13 +1457,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- [int nlocals]
       local locals_qty = read_int()
-      if
-         not (
-            debug_info == "included" and locals_qty >= parameters_qty + (has_local_arg and 1 or 0)
-            or
-            debug_info == "stripped" and locals_qty == 0
-         )
-      then
+      if not (locals_qty >= parameters_qty + (has_local_arg and 1 or 0) or locals_qty == 0) then
          error""
       end
       local all_locals = {}
@@ -1513,24 +1485,18 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
 
       -- [int nupvalnames]
       local upval_names_qty = read_int()
-      if
-         not (
-            debug_info == "included" and upval_names_qty == upv_qty
-            or
-            debug_info == "stripped" and upval_names_qty == 0
-         )
-      then
+      if not (upval_names_qty == upv_qty or upval_names_qty == 0) then
          error""
       end
       for j = 1, upval_names_qty do
          -- [string name]  debug info
          local name = read_string()
-         if not name then
-            error""
-         end
+         -- if not name then
+         --    error""
+         -- end
          all_upvalues[j].var_name = name
       end
-      if src_line_from == 0 and Lua_version >= 0x52 and not all_upvalues[1].var_name then
+      if is_root_proto and Lua_version >= 0x52 and not all_upvalues[1].var_name then
          -- if debug info is stripped, set the name of main chunk's upvalue
          all_upvalues[1].var_name = "_ENV"
 
@@ -2255,7 +2221,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
             protos_qty = protos_qty,
             all_protos = all_protos,                  -- [1..n] = Proto object
          },
-         debug_info,
+         debug_info,  -- true if debug info is included (fully or partially)
          max_used_parent_upvalue_index
    end
 
@@ -2273,7 +2239,7 @@ local function parse_or_convert_bytecode(bytecode_as_string_or_loader, convert_t
          bytes_per_lua_float = bytes_per_lua_float,
       },
       root_proto = root_proto,
-      debug_info_is_stripped = debug_info == "stripped"
+      debug_info_is_stripped = not debug_info
    }
 end
 
@@ -2298,7 +2264,7 @@ local function lpad(s, len, filler)
 end
 
 
-local function print_proto_object(Print, proto_object, Lua_version, depth, debug_info_is_stripped, subfunc_idx, path)
+local function print_proto_object(Print, proto_object, Lua_version, depth, subfunc_idx, path)
    -- Fields of Proto object:
    --    source
    --    src_line_from
@@ -2355,7 +2321,7 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
          ..(upv.var_name and " name: "..upv.var_name or "")
       )
    end
-   if not debug_info_is_stripped then
+   if proto_object.locals_qty ~= 0 then
       Print(indent.."Locals: "..proto_object.locals_qty)
       for j = 1, proto_object.locals_qty do
          local loc = proto_object.all_locals[j]
@@ -2438,7 +2404,7 @@ local function print_proto_object(Print, proto_object, Lua_version, depth, debug
    end
    Print(indent.."Functions: "..proto_object.protos_qty)
    for j = 1, proto_object.protos_qty do
-      print_proto_object(Print, proto_object.all_protos[j], Lua_version, depth + 1, debug_info_is_stripped, j, path)
+      print_proto_object(Print, proto_object.all_protos[j], Lua_version, depth + 1, j, path)
    end
 end
 
@@ -2465,7 +2431,7 @@ local function get_bytecode_listing(bytecode_object)
    Print("  Size of Lua integer = "..(enbi.bytes_per_lua_int or 0))
    Print("  Size of Lua float   = "..(enbi.bytes_per_lua_float or 0))
    Print("Debug info: "..(bytecode_object.debug_info_is_stripped and "stripped" or "included"))
-   print_proto_object(Print, bytecode_object.root_proto, bytecode_object.Lua_version, 0, bytecode_object.debug_info_is_stripped)
+   print_proto_object(Print, bytecode_object.root_proto, bytecode_object.Lua_version, 0)
    Print()
    return table.concat(printed_lines, "\n"), enbi_as_string
 end
